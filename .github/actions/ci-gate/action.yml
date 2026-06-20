@@ -217,7 +217,13 @@ runs:
             [ "$TRIVY_CRIT" -gt 0 ]   && echo "- 🛡 Trivy critical — ${TRIVY_CRIT} _(Stage 2)_"
             [ "$ESL" -gt 0 ]          && echo "- 🔍 ESLint errors — ${ESL} _(Stage 3)_"
             [ "$TSE" -gt 0 ]          && echo "- 📘 TypeScript errors — ${TSE} _(Stage 3)_"
-            [ "$TEST_BLOCKED" -gt 0 ] && echo "- 🧪 Vitest — ${T_FAIL} failure(s) _(Stage 4)_"
+            if [ "$TEST_BLOCKED" -gt 0 ]; then
+              if [ "$T_FAIL" -gt 0 ]; then
+                echo "- 🧪 Vitest — ${T_FAIL} test failure(s) _(Stage 4)_"
+              else
+                echo "- 🧪 Vitest — suite/import error (0 tests ran — check Stage 4 job log) _(Stage 4)_"
+              fi
+            fi
             if [ "$CONTEXT" = "staging" ] && [ "$BUILD_BLOCKED" -gt 0 ]; then
               echo "- 🏗 Production build FAILED _(Stage 5)_"
             fi
@@ -273,8 +279,12 @@ runs:
             if [ "$TSE" -gt 0 ]; then
               echo "| 3 | **${TSE} TypeScript error(s)** | **Annotations tab** → TypeScript TSxxxx inline on PR diff · Stage 3 job summary \`\`\`block |"
             fi
-            if [ "$TEST_BLOCKED" -gt 0 ]; then
-              echo "| 4 | **${T_FAIL} test failure(s)** | **Annotations tab** → Test Failed: <name> (file:line) · Stage 4 job summary (suite → test → assertion message) |"
+          if [ "$TEST_BLOCKED" -gt 0 ]; then
+              if [ "$T_FAIL" -gt 0 ]; then
+                echo "| 4 | **${T_FAIL} test failure(s)** | **Annotations tab** → Test Failed: <name> (file:line) · Stage 4 job summary (suite → test → assertion message) |"
+              else
+                echo "| 4 | **Test suite errored** (0 tests ran) | Stage 4 **job log** → look for import/module errors before any test output |"
+              fi
             fi
             if [ "$CONTEXT" = "staging" ] && [ "$BUILD_BLOCKED" -gt 0 ]; then
               echo "| 5 | **Production build failed** | **Annotations tab** → Build Error · Stage 5 job summary error log |"
