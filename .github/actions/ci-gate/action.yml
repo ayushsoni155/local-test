@@ -1,0 +1,289 @@
+name: "CI Gate — Report & Decision"
+description: >
+  Consumes all stage outputs, writes a colour-coded job summary (badge
+  table + verdict + blocking reasons), and exits non-zero if any
+  blocking finding exists. Used by the gate job in both feature-ci and
+  staging-ci so the evaluation logic lives in exactly one place.
+
+  Supports two contexts:
+    pr      — pull request gate (4 stages, shows PR number + head ref)
+    staging — push-to-main gate (5 stages, includes build result)
+
+inputs:
+  # ── context ────────────────────────────────────────────────────────────────
+  context:
+    description: "'pr' for pull-request gate, 'staging' for staging pipeline gate."
+    required: true
+
+  # ── stage run flags (drives SKIP badges) ───────────────────────────────────
+  stage2_ran:
+    description: "Whether Stage 2 ran ('true'/'false')."
+    required: false
+    default: "false"
+  stage3_ran:
+    description: "Whether Stage 3 ran ('true'/'false')."
+    required: false
+    default: "false"
+  stage4_ran:
+    description: "Whether Stage 4 ran ('true'/'false')."
+    required: false
+    default: "false"
+  stage5_ran:
+    description: "Whether Stage 5 ran ('true'/'false'). Only meaningful in staging context."
+    required: false
+    default: "false"
+
+  # ── stage metrics ──────────────────────────────────────────────────────────
+  secrets:
+    description: "Secret-scan finding count."
+    required: false
+    default: "0"
+  dep_critical:
+    description: "npm audit critical/high count."
+    required: false
+    default: "0"
+  dep_warnings:
+    description: "npm audit non-blocking warning count."
+    required: false
+    default: "0"
+  trivy_critical:
+    description: "Trivy blocking finding count."
+    required: false
+    default: "0"
+  trivy_warnings:
+    description: "Trivy non-blocking warning count."
+    required: false
+    default: "0"
+  static_critical:
+    description: "Static analysis error count (ESLint errors + TS errors)."
+    required: false
+    default: "0"
+  static_warnings:
+    description: "Static analysis warning count (ESLint warnings + Prettier)."
+    required: false
+    default: "0"
+  eslint_errors:
+    description: "ESLint error count."
+    required: false
+    default: "0"
+  ts_errors:
+    description: "TypeScript error count."
+    required: false
+    default: "0"
+  tests_passed:
+    description: "'true' if Vitest passed (or was skipped), 'false' if it failed."
+    required: false
+    default: "true"
+  test_failures:
+    description: "Number of failed tests."
+    required: false
+    default: "0"
+  skip_tests:
+    description: "Whether the test stage was intentionally skipped ('true'/'false')."
+    required: false
+    default: "false"
+  build_ok:
+    description: "Whether the production build succeeded ('true'/'false'). Staging only."
+    required: false
+    default: "true"
+
+  # ── PR-context extras ──────────────────────────────────────────────────────
+  pr_number:
+    description: "PR number (pr context only)."
+    required: false
+    default: ""
+  head_ref:
+    description: "Feature branch name (pr context only)."
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # ─── Build job summary ───────────────────────────────────────────────────
+    - name: Build summary
+      shell: bash
+      run: |
+        set -uo pipefail
+
+        # ── normalise inputs (empty string → 0 / false) ──────────────────────
+        SECRETS="${{ inputs.secrets }}";           SECRETS="${SECRETS:-0}"
+        DEP_CRITICAL="${{ inputs.dep_critical }}"; DEP_CRITICAL="${DEP_CRITICAL:-0}"
+        DEP_WARN="${{ inputs.dep_warnings }}";     DEP_WARN="${DEP_WARN:-0}"
+        TRIVY_CRIT="${{ inputs.trivy_critical }}"; TRIVY_CRIT="${TRIVY_CRIT:-0}"
+        TRIVY_WARN="${{ inputs.trivy_warnings }}"; TRIVY_WARN="${TRIVY_WARN:-0}"
+        S_CRIT="${{ inputs.static_critical }}";    S_CRIT="${S_CRIT:-0}"
+        S_WARN="${{ inputs.static_warnings }}";    S_WARN="${S_WARN:-0}"
+        ESL="${{ inputs.eslint_errors }}";         ESL="${ESL:-0}"
+        TSE="${{ inputs.ts_errors }}";             TSE="${TSE:-0}"
+        T_PASS="${{ inputs.tests_passed }}";       T_PASS="${T_PASS:-true}"
+        T_FAIL="${{ inputs.test_failures }}";      T_FAIL="${T_FAIL:-0}"
+        SKIP_T="${{ inputs.skip_tests }}";         SKIP_T="${SKIP_T:-false}"
+        B_OK="${{ inputs.build_ok }}";             B_OK="${B_OK:-true}"
+
+        S2="${{ inputs.stage2_ran }}"; S3="${{ inputs.stage3_ran }}"
+        S4="${{ inputs.stage4_ran }}"; S5="${{ inputs.stage5_ran }}"
+
+        CONTEXT="${{ inputs.context }}"
+
+        # ── aggregates ───────────────────────────────────────────────────────
+        S2_CRIT=$((DEP_CRITICAL + TRIVY_CRIT))
+        S2_WARN=$((DEP_WARN + TRIVY_WARN))
+        TOTAL_CRIT=$((SECRETS + DEP_CRITICAL + TRIVY_CRIT + S_CRIT))
+        TEST_BLOCKED=0; [ "$T_PASS" != "true" ] && TEST_BLOCKED=1
+        BUILD_BLOCKED=0
+        if [ "$CONTEXT" = "staging" ]; then
+          [ "$B_OK" != "true" ] && BUILD_BLOCKED=1
+        fi
+        ANY_BLOCKED=$(( TOTAL_CRIT + TEST_BLOCKED + BUILD_BLOCKED ))
+
+        # ── badge helpers ────────────────────────────────────────────────────
+        BASE="https://img.shields.io/badge"
+        FAIL_C="d73a49"; PASS_C="2ea44f"; WARN_C="dbab09"; SKIP_C="8b949e"
+
+        # cell <count> <ran>  — red FAIL(n) / green PASS / grey SKIP
+        cell() {
+          local n="${1:-0}" ran="${2:-true}"
+          if [ "$ran" != "true" ]; then
+            echo "![SKIP](${BASE}/SKIP-${SKIP_C}?style=flat)"
+          elif [ "$n" -gt 0 ]; then
+            echo "![FAIL](${BASE}/FAIL%20${n}-${FAIL_C}?style=flat)"
+          else
+            echo "![PASS](${BASE}/PASS-${PASS_C}?style=flat)"
+          fi
+        }
+
+        # tests_cell <passed> <ran> — green PASS / red FAIL / grey SKIP
+        tests_cell() {
+          local p="${1:-true}" ran="${2:-true}"
+          if [ "$ran" != "true" ]; then
+            if [ "$SKIP_T" = "true" ]; then
+              echo "![SKIP](${BASE}/SKIP%20intentional-${SKIP_C}?style=flat)"
+            else
+              echo "![SKIP](${BASE}/SKIP-${SKIP_C}?style=flat)"
+            fi
+          elif [ "$p" = "true" ]; then
+            echo "![PASS](${BASE}/PASS-${PASS_C}?style=flat)"
+          else
+            echo "![FAIL](${BASE}/FAIL-${FAIL_C}?style=flat)"
+          fi
+        }
+
+        # warn_cell <count> — yellow WARN(n) / em dash when clean
+        warn_cell() {
+          local n="${1:-0}"
+          [ "$n" -gt 0 ] \
+            && echo "![WARN](${BASE}/WARN%20${n}-${WARN_C}?style=flat)" \
+            || echo "—"
+        }
+
+        SHORT_SHA="${GITHUB_SHA:0:7}"
+        RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+        # ── header ───────────────────────────────────────────────────────────
+        if [ "$CONTEXT" = "pr" ]; then
+          TITLE="# Feature CI · PR #${{ inputs.pr_number }}"
+          META_ROW="| **Branch** | \`${{ inputs.head_ref }}\` → \`main\` |"
+        else
+          TITLE="# Staging Pipeline · \`main\` @ \`${SHORT_SHA}\`"
+          META_ROW="| **Triggered by** | Push to \`main\` (merge) |"
+        fi
+
+        {
+          echo "$TITLE"
+          echo ""
+          echo "| | |"
+          echo "|---|---|"
+          echo "| **Commit** | \`${SHORT_SHA}\` |"
+          echo "$META_ROW"
+          echo "| **Run** | [#${GITHUB_RUN_ID}](${RUN_URL}) |"
+          echo ""
+
+          # ── verdict ────────────────────────────────────────────────────────
+          if [ "$ANY_BLOCKED" -gt 0 ]; then
+            if [ "$CONTEXT" = "pr" ]; then
+              echo "## ❌ Result: BLOCKED — merge NOT allowed"
+              echo ""
+              echo "Fix the blocking items below, then re-push to the feature branch."
+            else
+              echo "## ❌ Staging validation FAILED"
+              echo ""
+              echo "The main branch did not pass all checks. **Production deployment is blocked.**"
+            fi
+            echo ""
+            echo "**Blocking issues:**"
+            [ "$SECRETS" -gt 0 ]      && echo "- 🔑 Secrets — ${SECRETS} finding(s) _(Stage 1)_"
+            [ "$DEP_CRITICAL" -gt 0 ] && echo "- 📦 npm critical/high vulns — ${DEP_CRITICAL} _(Stage 2)_"
+            [ "$TRIVY_CRIT" -gt 0 ]   && echo "- 🛡 Trivy critical — ${TRIVY_CRIT} _(Stage 2)_"
+            [ "$ESL" -gt 0 ]          && echo "- 🔍 ESLint errors — ${ESL} _(Stage 3)_"
+            [ "$TSE" -gt 0 ]          && echo "- 📘 TypeScript errors — ${TSE} _(Stage 3)_"
+            [ "$TEST_BLOCKED" -gt 0 ] && echo "- 🧪 Vitest — ${T_FAIL} failure(s) _(Stage 4)_"
+            if [ "$CONTEXT" = "staging" ] && [ "$BUILD_BLOCKED" -gt 0 ]; then
+              echo "- 🏗 Production build FAILED _(Stage 5)_"
+            fi
+          else
+            if [ "$CONTEXT" = "pr" ]; then
+              echo "## ✅ Result: PASSED — owner can merge"
+              echo ""
+              echo "All checks passed. A repository owner may now merge this PR."
+            else
+              echo "## ✅ Staging validation PASSED"
+              echo ""
+              echo "All checks passed. The main branch is healthy."
+              echo "A repository owner can now trigger a production deployment."
+            fi
+          fi
+
+          echo ""
+          echo "## Summary"
+          echo ""
+          echo "| Stage | Check | Status | Warnings |"
+          echo "|:-----:|:------|:------:|:--------:|"
+          echo "| 1 | Secrets &amp; credentials | $(cell "$SECRETS" true) | — |"
+          echo "| 2 | Dependencies &amp; Trivy | $(cell "$S2_CRIT" "$S2") | $(warn_cell "$S2_WARN") |"
+          echo "| 3 | Static analysis (ESLint / TS / Prettier) | $(cell "$S_CRIT" "$S3") | $(warn_cell "$S_WARN") |"
+          echo "| 4 | Unit tests (Vitest) | $(tests_cell "$T_PASS" "$S4") | — |"
+          if [ "$CONTEXT" = "staging" ]; then
+            echo "| 5 | Production build | $(cell "$([ "$B_OK" = "true" ] && echo 0 || echo 1)" "$S5") | — |"
+          fi
+          echo ""
+          echo "<sub>![FAIL](${BASE}/FAIL-${FAIL_C}?style=flat) blocks &nbsp;·&nbsp; ![PASS](${BASE}/PASS-${PASS_C}?style=flat) clean &nbsp;·&nbsp; ![WARN](${BASE}/WARN-${WARN_C}?style=flat) non-blocking &nbsp;·&nbsp; ![SKIP](${BASE}/SKIP-${SKIP_C}?style=flat) not run</sub>"
+          echo ""
+          echo "---"
+          echo "<sub>Full reports are attached as build artifacts.</sub>"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    # ─── Gate decision (exit 1 = required status check fails) ────────────────
+    - name: Gate decision
+      shell: bash
+      run: |
+        set -uo pipefail
+
+        SECRETS="${{ inputs.secrets }}";           SECRETS="${SECRETS:-0}"
+        DEP_CRITICAL="${{ inputs.dep_critical }}"; DEP_CRITICAL="${DEP_CRITICAL:-0}"
+        TRIVY_CRIT="${{ inputs.trivy_critical }}"; TRIVY_CRIT="${TRIVY_CRIT:-0}"
+        S_CRIT="${{ inputs.static_critical }}";    S_CRIT="${S_CRIT:-0}"
+        ESL="${{ inputs.eslint_errors }}";         ESL="${ESL:-0}"
+        TSE="${{ inputs.ts_errors }}";             TSE="${TSE:-0}"
+        T_PASS="${{ inputs.tests_passed }}";       T_PASS="${T_PASS:-true}"
+        T_FAIL="${{ inputs.test_failures }}";      T_FAIL="${T_FAIL:-0}"
+        B_OK="${{ inputs.build_ok }}";             B_OK="${B_OK:-true}"
+        CONTEXT="${{ inputs.context }}"
+
+        BLOCK=0; REASONS=""
+        [ "$SECRETS" -gt 0 ]      && { BLOCK=1; REASONS="${REASONS} secrets(${SECRETS});"; }
+        [ "$DEP_CRITICAL" -gt 0 ] && { BLOCK=1; REASONS="${REASONS} npm-vulns(${DEP_CRITICAL});"; }
+        [ "$TRIVY_CRIT" -gt 0 ]   && { BLOCK=1; REASONS="${REASONS} trivy(${TRIVY_CRIT});"; }
+        [ "$ESL" -gt 0 ]          && { BLOCK=1; REASONS="${REASONS} eslint-errors(${ESL});"; }
+        [ "$TSE" -gt 0 ]          && { BLOCK=1; REASONS="${REASONS} ts-errors(${TSE});"; }
+        [ "$T_PASS" != "true" ]   && { BLOCK=1; REASONS="${REASONS} test-failures(${T_FAIL});"; }
+        if [ "$CONTEXT" = "staging" ] && [ "$B_OK" != "true" ]; then
+          BLOCK=1; REASONS="${REASONS} build-failed;"
+        fi
+
+        if [ "$BLOCK" -gt 0 ]; then
+          echo "::error::CI Gate FAILED: ${REASONS}"
+          exit 1
+        fi
+
+        echo "✅ CI Gate PASSED — no blocking findings."

@@ -1,0 +1,43 @@
+name: "Run Vitest Test Suite"
+description: >
+  Runs the Vitest test suite with a JSON reporter so results can be
+  parsed. Emits `tests_passed` and `test_failures` outputs. Never fails
+  the build itself — the caller's gate job decides what to block on.
+
+inputs:
+  vitest-cmd:
+    description: "Vitest command to run (e.g. `npx vitest run --reporter=verbose`)."
+    required: false
+    default: "npx vitest run --reporter=verbose"
+
+outputs:
+  tests_passed:
+    description: "'true' if all tests passed, 'false' otherwise."
+    value: ${{ steps.run.outputs.tests_passed }}
+  test_failures:
+    description: "Number of failed tests (0 when all pass)."
+    value: ${{ steps.run.outputs.test_failures }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run Vitest
+      id: run
+      shell: bash
+      run: |
+        set -uo pipefail
+        EXIT=0
+        ${{ inputs.vitest-cmd }} --reporter=json --outputFile=vitest-results.json \
+          2>&1 | tee vitest.log || EXIT=$?
+
+        if [ "$EXIT" -eq 0 ]; then
+          echo "tests_passed=true" >> "$GITHUB_OUTPUT"
+          echo "test_failures=0"   >> "$GITHUB_OUTPUT"
+        else
+          # Parse failure count from JSON; fall back to the raw exit code.
+          FAIL_COUNT=$(jq \
+            '.testResults | map(.assertionResults[] | select(.status=="failed")) | length' \
+            vitest-results.json 2>/dev/null || echo "$EXIT")
+          echo "tests_passed=false"          >> "$GITHUB_OUTPUT"
+          echo "test_failures=${FAIL_COUNT}" >> "$GITHUB_OUTPUT"
+        fi

@@ -1,0 +1,41 @@
+name: "Build Application"
+description: >
+  Optionally generates the Prisma client, then runs the production build
+  command. Used in staging-ci Stage 5 and the production-deploy smoke
+  check — centralising build logic so both always stay in sync.
+  Emits a `build_ok` output ('true'/'false'). Never fails the build
+  itself — the caller aborts on failure.
+
+inputs:
+  build-cmd:
+    description: "Production build command (e.g. `npm run build`)."
+    required: false
+    default: "npm run build"
+  use-prisma:
+    description: "Run `npx prisma generate` before building. Set 'false' if no Prisma."
+    required: false
+    default: "true"
+
+outputs:
+  build_ok:
+    description: "'true' if the build succeeded, 'false' if it failed."
+    value: ${{ steps.build.outputs.build_ok }}
+
+runs:
+  using: composite
+  steps:
+    - name: Generate Prisma client
+      if: inputs.use-prisma == 'true'
+      shell: bash
+      run: npx prisma generate
+
+    - name: Production build
+      id: build
+      shell: bash
+      run: |
+        set -uo pipefail
+        BUILD_OK=false
+        if ${{ inputs.build-cmd }} 2>&1 | tee build.log; then
+          BUILD_OK=true
+        fi
+        echo "build_ok=${BUILD_OK}" >> "$GITHUB_OUTPUT"
