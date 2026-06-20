@@ -293,3 +293,105 @@ runs:
         echo ""
         echo "Total findings: $FINDINGS"
         echo "findings=$FINDINGS" >> "$GITHUB_OUTPUT"
+
+    # ── GitHub annotations + step summary ─────────────────────────────────────
+    - name: Report findings (annotations + summary)
+      if: always()
+      shell: bash
+      run: |
+        set -uo pipefail
+        SHORT_SHA="${GITHUB_SHA:0:7}"
+
+        # ── Gitleaks annotations ──────────────────────────────────────────────
+        # JSON structure: [{RuleID, File, StartLine, Commit, Secret(redacted)}]
+        if [ -s gitleaks-report.json ] && [ "$(jq 'length' gitleaks-report.json 2>/dev/null || echo 0)" -gt 0 ]; then
+          jq -r '.[] | [
+            (.File // "unknown"),
+            (.StartLine // 1 | tostring),
+            (.RuleID // "secret"),
+            (.Commit // "unknown" | .[0:10]),
+            (.Description // "Secret detected")
+          ] | join("\t")' gitleaks-report.json 2>/dev/null \
+          | while IFS=$'\t' read -r file line rule commit desc; do
+              printf '::error file=%s,line=%s,title=Secret [%s] in commit %s::%s — commit: %s file: %s line: %s\n' \
+                "$file" "$line" "$rule" "$commit" "$desc" "$commit" "$file" "$line"
+            done || true
+        fi
+
+        # ── .env file annotations ─────────────────────────────────────────────
+        if [ -s env-committed.txt ]; then
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            printf '::error file=%s,line=1,title=Committed .env file::.env file committed to git history — remove with git filter-repo\n' "$f"
+          done < env-committed.txt || true
+        fi
+
+        # ── Private key annotations ───────────────────────────────────────────
+        if [ -s private-keys-detail.tsv ]; then
+          while IFS=$'\t' read -r file sha date where; do
+            [ -z "$file" ] && continue
+            printf '::error file=%s,line=1,title=Private key [%s]::%s — %s\n' \
+              "$file" "${sha:--}" "$file" "$where"
+          done < private-keys-detail.tsv || true
+        fi
+
+        # ── TruffleHog annotations ────────────────────────────────────────────
+        if [ -s trufflehog-history.json ]; then
+          grep '"SourceMetadata"' trufflehog-history.json 2>/dev/null \
+          | jq -r '
+              .SourceMetadata.Data.Git.file? // "unknown" as $file |
+              .SourceMetadata.Data.Git.line? // 1 as $line |
+              .SourceMetadata.Data.Git.commit? // "unknown" as $commit |
+              .DetectorName? // "secret" as $detector |
+              "::error file=\($file),line=\($line | tostring),title=TruffleHog [\($detector)] commit \($commit[0:10])::Verified secret detected — \($detector) in \($file) at line \($line | tostring) (commit \($commit[0:10]))"
+            ' 2>/dev/null || true
+        fi
+
+        # ── Step summary ──────────────────────────────────────────────────────
+        GL=$(jq 'length' gitleaks-report.json 2>/dev/null || echo 0)
+        EN=$(wc -l < env-committed.txt 2>/dev/null | tr -d ' '); EN=${EN:-0}
+        PK=$(wc -l < private-keys.txt  2>/dev/null | tr -d ' '); PK=${PK:-0}
+        TH=$(grep -c '"SourceMetadata"' trufflehog-history.json 2>/dev/null || true); TH=${TH:-0}
+        TOTAL=$((GL + EN + PK + TH))
+
+        {
+          echo "### Stage 1 · Secret Scan — commit \`${SHORT_SHA}\`"
+          echo ""
+          echo "| Scanner | Findings |"
+          echo "|:--------|:--------:|"
+          echo "| Gitleaks | ${GL} |"
+          echo "| Committed .env files | ${EN} |"
+          echo "| Private key files | ${PK} |"
+          echo "| TruffleHog (verified) | ${TH} |"
+          echo "| **Total** | **${TOTAL}** |"
+
+          if [ "${GL}" -gt 0 ] && [ -s gitleaks-report.json ]; then
+            echo ""
+            echo "#### Gitleaks Findings"
+            echo "| File | Line | Rule | Commit | Description |"
+            echo "|:-----|-----:|:-----|:-------|:------------|"
+            jq -r '.[] | "| `" + (.File // "?") + "` | " + ((.StartLine // 1) | tostring) +
+              " | `" + (.RuleID // "?") + "` | `" + ((.Commit // "?")[0:10]) +
+              "` | " + (.Description // "-") + " |"' \
+              gitleaks-report.json 2>/dev/null | head -20 || true
+          fi
+
+          if [ "${EN}" -gt 0 ]; then
+            echo ""
+            echo "#### Committed .env Files"
+            echo '```'
+            cat env-committed.txt
+            echo '```'
+          fi
+
+          if [ "${PK}" -gt 0 ] && [ -s private-keys-detail.tsv ]; then
+            echo ""
+            echo "#### Private Key Files"
+            echo "| File | Commit | Date | Location |"
+            echo "|:-----|:-------|:-----|:---------|"
+            while IFS=$'\t' read -r f sha date where; do
+              [ -z "$f" ] && continue
+              echo "| \`$f\` | \`${sha:--}\` | ${date:--} | $where |"
+            done < private-keys-detail.tsv | head -20 || true
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"

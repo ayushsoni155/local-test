@@ -93,13 +93,92 @@ runs:
         CRITICAL=$((CRIT + HIGH))
         WARNINGS=$((MOD + LOW + INFO + OUTDATED + DEPRECATED))
 
-        # Log the full breakdown for humans reading the run...
         echo "Critical/High vulns: $CRITICAL"
         echo "Moderate=$MOD Low=$LOW Info=$INFO Outdated=$OUTDATED Deprecated=$DEPRECATED"
         echo "Non-blocking warnings: $WARNINGS"
 
-        # ...but only expose the two declared outputs the caller actually gates on.
         {
           echo "critical=$CRITICAL"
           echo "warnings=$WARNINGS"
         } >> "$GITHUB_OUTPUT"
+
+    # ── GitHub annotations + step summary ─────────────────────────────────────
+    - name: Report findings (annotations + summary)
+      if: always()
+      shell: bash
+      run: |
+        set -uo pipefail
+        SHORT_SHA="${GITHUB_SHA:0:7}"
+
+        # ── npm audit annotations ─────────────────────────────────────────────
+        # Emit one ::error per critical/high vulnerability with package + fix info.
+        if [ -s npm-audit.json ]; then
+          jq -r '
+            .vulnerabilities // {} | to_entries[] |
+            select(.value.severity == "critical" or .value.severity == "high") |
+            [
+              .key,
+              .value.severity,
+              (.value.range // "?"),
+              (.value.fixAvailable.version // .value.fixAvailable // "no fix"  | tostring),
+              ((.value.via // []) | map(select(type=="object") | .url // "") | join(", "))
+            ] | join("\t")
+          ' npm-audit.json 2>/dev/null \
+          | while IFS=$'\t' read -r pkg sev range fix cves; do
+              printf '::error file=package.json,line=1,title=npm audit [%s] %s::Package %s@%s has %s severity vuln. Fix: %s CVEs: %s\n' \
+                "$sev" "$pkg" "$pkg" "$range" "$sev" "$fix" "${cves:--}"
+            done || true
+        fi
+
+        # ── Step summary ──────────────────────────────────────────────────────
+        CRIT=0; HIGH=0; MOD=0; LOW=0
+        if [ -s npm-audit.json ]; then
+          CRIT=$(jq '.metadata.vulnerabilities.critical // 0' npm-audit.json 2>/dev/null || echo 0)
+          HIGH=$(jq '.metadata.vulnerabilities.high     // 0' npm-audit.json 2>/dev/null || echo 0)
+          MOD=$( jq '.metadata.vulnerabilities.moderate // 0' npm-audit.json 2>/dev/null || echo 0)
+          LOW=$( jq '.metadata.vulnerabilities.low      // 0' npm-audit.json 2>/dev/null || echo 0)
+        fi
+        OUTDATED=$(jq 'keys | length' npm-outdated.json 2>/dev/null || echo 0)
+        DEPR=$(wc -l < deprecated.txt 2>/dev/null | tr -d ' '); DEPR=${DEPR:-0}
+
+        {
+          echo "### Stage 2 · Dependency Scan — commit \`${SHORT_SHA}\`"
+          echo ""
+          echo "| Severity | Count |"
+          echo "|:---------|------:|"
+          echo "| 🔴 Critical | ${CRIT} |"
+          echo "| 🟠 High | ${HIGH} |"
+          echo "| 🟡 Moderate | ${MOD} |"
+          echo "| ⬜ Low | ${LOW} |"
+          echo "| 📦 Outdated packages | ${OUTDATED} |"
+          echo "| ⚠️ Deprecated packages | ${DEPR} |"
+
+          # Detail table for critical+high
+          BLOCK=$((CRIT + HIGH))
+          if [ "$BLOCK" -gt 0 ] && [ -s npm-audit.json ]; then
+            echo ""
+            echo "#### Critical / High Vulnerabilities"
+            echo "| Package | Severity | Vulnerable Range | Fix Version | CVEs |"
+            echo "|:--------|:---------|:-----------------|:------------|:-----|"
+            jq -r '
+              .vulnerabilities // {} | to_entries[] |
+              select(.value.severity == "critical" or .value.severity == "high") |
+              "| `" + .key + "` | " + .value.severity +
+              " | `" + (.value.range // "?") + "` | " +
+              (.value.fixAvailable.version // .value.fixAvailable // "no fix" | tostring) +
+              " | " + ((.value.via // []) | map(select(type=="object") | "[" + (.title // .url) + "](" + (.url // "#") + ")") | join(", ")) +
+              " |"
+            ' npm-audit.json 2>/dev/null | head -30 || true
+          fi
+
+          # Outdated detail
+          if [ "$OUTDATED" -gt 0 ] && [ -s npm-outdated.json ]; then
+            echo ""
+            echo "#### Outdated Packages"
+            echo "| Package | Current | Wanted | Latest |"
+            echo "|:--------|:--------|:-------|:-------|"
+            jq -r 'to_entries[] | "| `" + .key + "` | " + (.value.current // "?") +
+              " | " + (.value.wanted // "?") + " | " + (.value.latest // "?") + " |"' \
+              npm-outdated.json 2>/dev/null | head -20 || true
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
