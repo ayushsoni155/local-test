@@ -1,23 +1,13 @@
-# =============================================================================
-#  MAIN → STAGING  ·  Staging Validation Pipeline
-# =============================================================================
-#  Trigger  : Push to `main` (fires after every owner merge)
-#  Purpose  : Confirm main is healthy before production deployment.
+# Main → Staging Validation Pipeline
+# Runs on every push to main (i.e. after an owner merges a PR).
+# Confirms main is healthy before a production deployment is allowed.
+# Required status check name: "Staging Pipeline · Status"
 #
-#  Stages (sequential, fail-fast):
-#    1 · Secrets        Gitleaks + TruffleHog + .env + private keys
-#    2 · Dependencies   npm audit + Trivy (vuln / secret / misconfig)
-#    3 · Static         ESLint + TypeScript + Prettier
-#    4 · Tests          Vitest  (skip by setting SKIP_TESTS = true in repo vars)
-#    5 · Build          Production build must compile cleanly
-#    Gate               Single required status check
-#
-#  ⚙️  Per-project knobs (change these only):
-#    NODE_VERSION  — match package.json engines.node
-#    VITEST_CMD    — e.g. "npm test" or "npx vitest run"
-#    BUILD_CMD     — e.g. "npm run build"
-#    USE_PRISMA    — set "false" if your project doesn't use Prisma
-# =============================================================================
+# ⚙️  Knobs (edit only these):
+#   NODE_VERSION — match your package.json engines.node
+#   VITEST_CMD   — your test command
+#   BUILD_CMD    — your production build command
+#   USE_PRISMA   — set "false" if your project has no Prisma
 
 name: "Staging Pipeline · Main → Staging"
 
@@ -27,7 +17,7 @@ on:
 
 concurrency:
   group: staging-pipeline-${{ github.ref }}
-  cancel-in-progress: true   # skip older run if two merges hit main quickly
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -39,9 +29,8 @@ env:
   USE_PRISMA:   "true"
   SKIP_TESTS:   ${{ vars.SKIP_TESTS || 'false' }}
 
-# =============================================================================
 jobs:
-# ── Stage 1 · Secrets & Credentials ──────────────────────────────────────────
+  # Stage 1 — Secrets: Gitleaks + TruffleHog + .env + private keys
   stage-1-secrets:
     name: "Stage 1 · Secrets & Credentials"
     runs-on: ubuntu-latest
@@ -65,13 +54,11 @@ jobs:
           path: |
             gitleaks-report.json
             trufflehog-history.json
-            trufflehog-history.log
             env-committed.txt
-            private-keys.txt
             private-keys-detail.tsv
             private-key-content.txt
 
-# ── Stage 2 · Dependencies & Vulnerabilities ──────────────────────────────────
+  # Stage 2 — Dependencies: npm audit + Trivy (vulns / secrets / misconfigs)
   stage-2-deps:
     name: "Stage 2 · Dependencies & Vulnerabilities"
     needs: stage-1-secrets
@@ -86,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node (no install — scans use lockfile only)
+      - name: Setup Node (lockfile-only scan — no full install needed)
         uses: ./.github/actions/setup-node
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -113,7 +100,7 @@ jobs:
             trivy-report.json
             trivy-report.sarif
 
-# ── Stage 3 · Static Code Analysis ───────────────────────────────────────────
+  # Stage 3 — Static analysis: ESLint + TypeScript + Prettier
   stage-3-static:
     name: "Stage 3 · Static Code Analysis"
     needs: stage-2-deps
@@ -152,7 +139,7 @@ jobs:
             tsc.log
             prettier.log
 
-# ── Stage 4 · Full Test Suite (Vitest) ────────────────────────────────────────
+  # Stage 4 — Tests: Vitest (skipped when SKIP_TESTS repo var = true)
   stage-4-tests:
     name: "Stage 4 · Full Test Suite (Vitest)"
     needs: stage-3-static
@@ -186,11 +173,10 @@ jobs:
             vitest-results.json
             vitest.log
 
-# ── Stage 5 · Production Build Verification ───────────────────────────────────
+  # Stage 5 — Build: production build must compile cleanly
   stage-5-build:
     name: "Stage 5 · Production Build"
     needs: [stage-3-static, stage-4-tests]
-    # Runs when static is clean AND (tests passed OR were intentionally skipped)
     if: >
       always() &&
       needs.stage-3-static.outputs.critical == '0' &&
@@ -223,17 +209,17 @@ jobs:
           if-no-files-found: ignore
           path: build.log
 
-# ── Gate · Staging Status (required status check) ─────────────────────────────
+  # Gate — single required status check consumed by the branch ruleset
   gate:
-    name: "Staging Pipeline · Status"   # ← this exact name goes in the branch ruleset
+    name: "Staging Pipeline · Status"
     needs: [stage-1-secrets, stage-2-deps, stage-3-static, stage-4-tests, stage-5-build]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4   # needed to resolve ./.github/actions/ci-gate
+      - uses: actions/checkout@v4
 
-      - name: Download all stage reports
+      - name: Download stage reports
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
@@ -244,27 +230,21 @@ jobs:
       - name: Report & gate decision
         uses: ./.github/actions/ci-gate
         with:
-          context:        "staging"
-          # Stage run flags
-          stage2_ran:     ${{ needs.stage-2-deps.result != 'skipped' }}
-          stage3_ran:     ${{ needs.stage-3-static.result != 'skipped' }}
-          stage4_ran:     ${{ needs.stage-4-tests.result != 'skipped' }}
-          stage5_ran:     ${{ needs.stage-5-build.result != 'skipped' }}
-          # Stage 1 — secrets
-          secrets:        ${{ needs.stage-1-secrets.outputs.findings }}
-          # Stage 2 — dependencies
-          dep_critical:   ${{ needs.stage-2-deps.outputs.critical }}
-          dep_warnings:   ${{ needs.stage-2-deps.outputs.warnings }}
-          trivy_critical: ${{ needs.stage-2-deps.outputs.trivy_critical }}
-          trivy_warnings: ${{ needs.stage-2-deps.outputs.trivy_warnings }}
-          # Stage 3 — static analysis
+          context:         "staging"
+          stage2_ran:      ${{ needs.stage-2-deps.result != 'skipped' }}
+          stage3_ran:      ${{ needs.stage-3-static.result != 'skipped' }}
+          stage4_ran:      ${{ needs.stage-4-tests.result != 'skipped' }}
+          stage5_ran:      ${{ needs.stage-5-build.result != 'skipped' }}
+          secrets:         ${{ needs.stage-1-secrets.outputs.findings }}
+          dep_critical:    ${{ needs.stage-2-deps.outputs.critical }}
+          dep_warnings:    ${{ needs.stage-2-deps.outputs.warnings }}
+          trivy_critical:  ${{ needs.stage-2-deps.outputs.trivy_critical }}
+          trivy_warnings:  ${{ needs.stage-2-deps.outputs.trivy_warnings }}
           static_critical: ${{ needs.stage-3-static.outputs.critical }}
           static_warnings: ${{ needs.stage-3-static.outputs.warnings }}
           eslint_errors:   ${{ needs.stage-3-static.outputs.eslint_errors }}
           ts_errors:       ${{ needs.stage-3-static.outputs.ts_errors }}
-          # Stage 4 — tests
-          tests_passed:   ${{ needs.stage-4-tests.outputs.tests_passed }}
-          test_failures:  ${{ needs.stage-4-tests.outputs.test_failures }}
-          skip_tests:     ${{ vars.SKIP_TESTS || 'false' }}
-          # Stage 5 — build
-          build_ok:       ${{ needs.stage-5-build.outputs.build_ok }}
+          tests_passed:    ${{ needs.stage-4-tests.outputs.tests_passed }}
+          test_failures:   ${{ needs.stage-4-tests.outputs.test_failures }}
+          skip_tests:      ${{ vars.SKIP_TESTS || 'false' }}
+          build_ok:        ${{ needs.stage-5-build.outputs.build_ok }}

@@ -1,20 +1,11 @@
-# =============================================================================
-#  FEATURE → MAIN  ·  Pull Request CI Gate
-# =============================================================================
-#  Trigger  : Every PR targeting `main`
-#  Purpose  : Block merge until all CI stages pass + owner approves.
+# Feature → Main CI Gate
+# Runs on every PR to main. Blocks merge until all stages pass.
+# Required status check name: "CI Gate · Feature → Main"
 #
-#  Stages (sequential, fail-fast):
-#    1 · Secrets        Gitleaks + TruffleHog + .env + private keys
-#    2 · Dependencies   npm audit + Trivy (vuln / secret / misconfig)
-#    3 · Static         ESLint + TypeScript + Prettier
-#    4 · Tests          Vitest  (skip by setting SKIP_TESTS = true in repo vars)
-#    Gate               Single required status check → add to branch ruleset
-#
-#  ⚙️  Per-project knobs (change these only):
-#    NODE_VERSION  — match package.json engines.node
-#    VITEST_CMD    — e.g. "npm test" or "npx vitest run"
-# =============================================================================
+# ⚙️  Knobs (edit only these):
+#   NODE_VERSION — must match your package.json engines.node
+#   VITEST_CMD   — your test command
+#   SKIP_TESTS   — set repo variable SKIP_TESTS=true to skip stage 4
 
 name: "CI Gate · Feature → Main"
 
@@ -36,9 +27,8 @@ env:
   VITEST_CMD:   "npx vitest run --reporter=verbose"
   SKIP_TESTS:   ${{ vars.SKIP_TESTS || 'false' }}
 
-# =============================================================================
 jobs:
-# ── Stage 1 · Secrets & Credentials ──────────────────────────────────────────
+  # Stage 1 — Secrets: Gitleaks + TruffleHog + .env + private keys
   stage-1-secrets:
     name: "Stage 1 · Secrets & Credentials"
     runs-on: ubuntu-latest
@@ -62,15 +52,11 @@ jobs:
           path: |
             gitleaks-report.json
             trufflehog-history.json
-            trufflehog-history.log
             env-committed.txt
-            private-keys.txt
-            private-keys-tree.txt
             private-keys-detail.tsv
-            private-keys-history.tsv
             private-key-content.txt
 
-# ── Stage 2 · Dependencies & Vulnerabilities ──────────────────────────────────
+  # Stage 2 — Dependencies: npm audit + Trivy (vulns / secrets / misconfigs)
   stage-2-deps:
     name: "Stage 2 · Dependencies & Vulnerabilities"
     needs: stage-1-secrets
@@ -85,7 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node (no install — scans use lockfile only)
+      - name: Setup Node (lockfile-only scan — no full install needed)
         uses: ./.github/actions/setup-node
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -107,14 +93,12 @@ jobs:
           if-no-files-found: ignore
           path: |
             npm-audit.json
-            npm-audit.log
             npm-outdated.json
-            npm-outdated.log
             deprecated.txt
             trivy-report.json
             trivy-report.sarif
 
-# ── Stage 3 · Static Code Analysis ───────────────────────────────────────────
+  # Stage 3 — Static analysis: ESLint + TypeScript + Prettier
   stage-3-static:
     name: "Stage 3 · Static Code Analysis"
     needs: stage-2-deps
@@ -154,7 +138,7 @@ jobs:
             tsc.log
             prettier.log
 
-# ── Stage 4 · Unit Tests (Vitest) ─────────────────────────────────────────────
+  # Stage 4 — Tests: Vitest (skipped when SKIP_TESTS repo var = true)
   stage-4-tests:
     name: "Stage 4 · Unit Tests (Vitest)"
     needs: stage-3-static
@@ -188,17 +172,17 @@ jobs:
             vitest-results.json
             vitest.log
 
-# ── Gate · Merge Decision (required status check) ─────────────────────────────
+  # Gate — single required status check consumed by the branch ruleset
   gate:
-    name: "CI Gate · Feature → Main"   # ← this exact name goes in the branch ruleset
+    name: "CI Gate · Feature → Main"
     needs: [stage-1-secrets, stage-2-deps, stage-3-static, stage-4-tests]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4   # needed to resolve ./.github/actions/ci-gate
+      - uses: actions/checkout@v4
 
-      - name: Download all stage reports
+      - name: Download stage reports
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
@@ -209,26 +193,21 @@ jobs:
       - name: Report & gate decision
         uses: ./.github/actions/ci-gate
         with:
-          context:        "pr"
-          pr_number:      ${{ github.event.pull_request.number }}
-          head_ref:       ${{ github.head_ref }}
-          # Stage run flags
-          stage2_ran:     ${{ needs.stage-2-deps.result != 'skipped' }}
-          stage3_ran:     ${{ needs.stage-3-static.result != 'skipped' }}
-          stage4_ran:     ${{ needs.stage-4-tests.result != 'skipped' }}
-          # Stage 1 — secrets
-          secrets:        ${{ needs.stage-1-secrets.outputs.findings }}
-          # Stage 2 — dependencies
-          dep_critical:   ${{ needs.stage-2-deps.outputs.critical }}
-          dep_warnings:   ${{ needs.stage-2-deps.outputs.warnings }}
-          trivy_critical: ${{ needs.stage-2-deps.outputs.trivy_critical }}
-          trivy_warnings: ${{ needs.stage-2-deps.outputs.trivy_warnings }}
-          # Stage 3 — static analysis
+          context:         "pr"
+          pr_number:       ${{ github.event.pull_request.number }}
+          head_ref:        ${{ github.head_ref }}
+          stage2_ran:      ${{ needs.stage-2-deps.result != 'skipped' }}
+          stage3_ran:      ${{ needs.stage-3-static.result != 'skipped' }}
+          stage4_ran:      ${{ needs.stage-4-tests.result != 'skipped' }}
+          secrets:         ${{ needs.stage-1-secrets.outputs.findings }}
+          dep_critical:    ${{ needs.stage-2-deps.outputs.critical }}
+          dep_warnings:    ${{ needs.stage-2-deps.outputs.warnings }}
+          trivy_critical:  ${{ needs.stage-2-deps.outputs.trivy_critical }}
+          trivy_warnings:  ${{ needs.stage-2-deps.outputs.trivy_warnings }}
           static_critical: ${{ needs.stage-3-static.outputs.critical }}
           static_warnings: ${{ needs.stage-3-static.outputs.warnings }}
           eslint_errors:   ${{ needs.stage-3-static.outputs.eslint_errors }}
           ts_errors:       ${{ needs.stage-3-static.outputs.ts_errors }}
-          # Stage 4 — tests
-          tests_passed:   ${{ needs.stage-4-tests.outputs.tests_passed }}
-          test_failures:  ${{ needs.stage-4-tests.outputs.test_failures }}
-          skip_tests:     ${{ vars.SKIP_TESTS || 'false' }}
+          tests_passed:    ${{ needs.stage-4-tests.outputs.tests_passed }}
+          test_failures:   ${{ needs.stage-4-tests.outputs.test_failures }}
+          skip_tests:      ${{ vars.SKIP_TESTS || 'false' }}
