@@ -1,36 +1,7 @@
 {
-  "_comment": [
-    "RULESET: Protect staging — validates that main is healthy after every merge",
-    "",
-    "HOW TO IMPORT:",
-    "  GitHub → Settings → Rules → Rulesets → ▼ New ruleset → Import a ruleset",
-    "  Upload this file.",
-    "",
-    "WHEN TO USE THIS RULESET:",
-    "  Use this ONLY if you maintain a dedicated 'staging' branch that is",
-    "  separate from 'main'. If your project deploys to staging directly from",
-    "  main (which is the default pipeline setup), you do NOT need this ruleset.",
-    "  The staging-ci.yml workflow already validates main on every push.",
-    "",
-    "WHAT THIS ENFORCES (on a 'staging' branch):",
-    "  • No direct pushes — only merges from main (via PR) are allowed",
-    "  • No force pushes",
-    "  • No branch deletion",
-    "  • Status check 'Staging Pipeline · Status' must be GREEN",
-    "  • Requires 1 PR approval (owner only — same pattern as main)",
-    "",
-    "BYPASS ACTORS:",
-    "  Admin role, pull_request mode — owners can promote main → staging",
-    "  without waiting for a separate review, but the staging CI gate must pass.",
-    "",
-    "SETUP NOTES:",
-    "  1. The 'integration_id: 15368' is the GitHub Actions app — do not change it.",
-    "  2. The status check 'Staging Pipeline · Status' comes from staging-ci.yml.",
-    "     It runs automatically when main receives a push.",
-    "  3. Remove 'required_linear_history' if your team prefers merge commits."
-  ],
-  "name": "Protect · staging",
+  "name": "Protect · staging (CI gate + PR required)",
   "target": "branch",
+  "source_type": "Repository",
   "enforcement": "active",
   "bypass_actors": [
     {
@@ -62,10 +33,9 @@
       "parameters": {
         "required_approving_review_count": 1,
         "dismiss_stale_reviews_on_push": true,
-        "require_code_owner_review": true,
+        "require_code_owner_review": false,
         "require_last_push_approval": true,
-        "required_review_thread_resolution": false,
-        "automatic_copilot_code_review_enabled": false
+        "required_review_thread_resolution": false
       }
     },
     {
