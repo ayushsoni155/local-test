@@ -1,0 +1,69 @@
+{
+  "_comment": [
+    "RULESET: Feature branch safety net",
+    "",
+    "HOW TO IMPORT:",
+    "  GitHub → Settings → Rules → Rulesets → ▼ New ruleset → Import a ruleset",
+    "  Upload this file.",
+    "",
+    "WHAT THIS ENFORCES (on feature/* branches):",
+    "  • No force pushes — prevents accidentally overwriting a teammate's work.",
+    "    Developers can still 'git push --force-with-lease' on their OWN branch",
+    "    because Write-role users are in the bypass list with 'always' mode.",
+    "    If you want to completely block force pushes even for developers,",
+    "    remove the bypass_actors block.",
+    "",
+    "WHAT THIS DOES NOT DO:",
+    "  • Does NOT block direct pushes — devs must be free to push to their feature",
+    "    branches without opening a PR every time.",
+    "  • Does NOT require CI to pass on feature branches — CI only gates the PR",
+    "    into main (that is handled by protect-main.json).",
+    "  • Does NOT block branch deletion — devs should be able to clean up their",
+    "    own branches after merge.",
+    "",
+    "BYPASS ACTORS:",
+    "  Write role (actor_id 3), always mode — any collaborator with write access",
+    "  can force-push their own feature branches (e.g. after an interactive rebase).",
+    "  Admin role (actor_id 5) also bypasses as a superset.",
+    "",
+    "BRANCH PATTERN:",
+    "  'refs/heads/feature/**' matches:",
+    "    feature/add-product-page",
+    "    feature/TICKET-123/fix-auth",
+    "    feature/ayush/new-webhook",
+    "  To also cover 'fix/', 'chore/', 'hotfix/' etc., add more patterns to",
+    "  the 'include' array, e.g. 'refs/heads/fix/**', 'refs/heads/hotfix/**'."
+  ],
+  "name": "Feature branch safety",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [
+    {
+      "actor_id": 3,
+      "actor_type": "RepositoryRole",
+      "bypass_mode": "always"
+    },
+    {
+      "actor_id": 5,
+      "actor_type": "RepositoryRole",
+      "bypass_mode": "always"
+    }
+  ],
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "refs/heads/feature/**",
+        "refs/heads/fix/**",
+        "refs/heads/hotfix/**",
+        "refs/heads/chore/**",
+        "refs/heads/refactor/**"
+      ],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "non_fast_forward"
+    }
+  ]
+}

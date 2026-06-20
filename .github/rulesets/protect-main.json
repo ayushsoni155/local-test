@@ -1,0 +1,85 @@
+{
+  "_comment": [
+    "RULESET: Protect main branch",
+    "",
+    "HOW TO IMPORT:",
+    "  GitHub → Settings → Rules → Rulesets → ▼ New ruleset → Import a ruleset",
+    "  Upload this file. Then in 'Bypass list' replace the placeholder actor_id",
+    "  with your real user/team ID (see SETUP NOTES below).",
+    "",
+    "WHAT THIS ENFORCES:",
+    "  • No direct pushes — every change must come through a Pull Request",
+    "  • No force pushes — git history is permanent",
+    "  • No branch deletion",
+    "  • Require 1 approving review (code owner review required)",
+    "  • Stale reviews dismissed when new commits are pushed",
+    "  • Status check 'CI Gate · Feature → Main' must be GREEN before merge",
+    "  • Linear history (squash / rebase merges only — keeps log clean)",
+    "",
+    "BYPASS ACTORS (who can skip the PR approval count, but NOT the CI gate):",
+    "  actor_type RepositoryRole, actor_id 5 = Admin role",
+    "  bypass_mode 'pull_request' = admins can merge without an extra approver,",
+    "  but they CANNOT push directly to main and CI must still pass.",
+    "",
+    "SETUP NOTES:",
+    "  1. The 'integration_id: 15368' is the GitHub Actions app — do not change it.",
+    "  2. To restrict merges to specific users, add a Team bypass actor instead:",
+    "       { 'actor_id': <your-team-id>, 'actor_type': 'Team', 'bypass_mode': 'pull_request' }",
+    "     Find team IDs at: https://api.github.com/orgs/<org>/teams",
+    "  3. For a solo/personal repo the Admin role bypass is sufficient.",
+    "  4. Remove 'required_linear_history' if your team prefers merge commits."
+  ],
+  "name": "Protect · main",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [
+    {
+      "actor_id": 5,
+      "actor_type": "RepositoryRole",
+      "bypass_mode": "pull_request"
+    }
+  ],
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "refs/heads/main"
+      ],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "type": "required_linear_history"
+    },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 1,
+        "dismiss_stale_reviews_on_push": true,
+        "require_code_owner_review": true,
+        "require_last_push_approval": true,
+        "required_review_thread_resolution": false,
+        "automatic_copilot_code_review_enabled": false
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          {
+            "context": "CI Gate \u00b7 Feature \u2192 Main",
+            "integration_id": 15368
+          }
+        ]
+      }
+    }
+  ]
+}
