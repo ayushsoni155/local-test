@@ -1,31 +1,22 @@
-# =============================================================================
-#  PRODUCTION DEPLOY  ·  Manual Owner-Only Deployment
-# =============================================================================
-#  Trigger  : Manual (Actions UI → Run workflow)
-#  Who runs : Only reviewers listed in the "production" GitHub Environment.
+# Production Deploy — Manual, Owner Only
+# Triggered manually from Actions UI. Requires typing DEPLOY in the confirm field.
+# GitHub Environment approval gate pauses the run until an owner approves.
 #
-#  Flow:
-#    Guard       — validate "DEPLOY" confirmation + environment approval gate
-#    Smoke check — fresh secret scan + production build on HEAD of main
-#    Deploy      — your deploy commands (uncomment one option below)
-#    Audit log   — permanent record of who / what / when / why
+# ⚙️  One-time setup:
+#   Settings → Environments → "production"
+#     ✅ Required reviewers: add owner GitHub username(s)
+#     ✅ Restrict to main branch
 #
-#  ⚙️  Setup (one-time):
-#    Settings → Environments → "production"
-#      ✅ Required reviewers: owner GitHub username(s)
-#      ✅ Restrict to: main branch only
+# ⚙️  Knobs (edit only these):
+#   NODE_VERSION — match your package.json engines.node
+#   BUILD_CMD    — your production build command
+#   USE_PRISMA   — set "false" if your project has no Prisma
 #
-#  ⚙️  Per-project knobs:
-#    NODE_VERSION — match package.json engines.node
-#    BUILD_CMD    — your production build command
-#    USE_PRISMA   — set "false" if your project doesn't use Prisma
-#
-#  ⚙️  Secrets to add (Settings → Secrets → Actions):
-#    Shopify CLI:  SHOPIFY_CLI_PARTNERS_TOKEN
-#    Railway:      RAILWAY_TOKEN
-#    Render:       RENDER_DEPLOY_HOOK_URL
-#    Docker:       DOCKER_USERNAME, DOCKER_PASSWORD
-# =============================================================================
+# ⚙️  Secrets to add (Settings → Secrets → Actions):
+#   SHOPIFY_CLI_PARTNERS_TOKEN  — for Shopify CLI deploy
+#   RAILWAY_TOKEN               — for Railway
+#   RENDER_DEPLOY_HOOK_URL      — for Render
+#   DOCKER_USERNAME / DOCKER_PASSWORD — for Docker
 
 name: "Production Deploy · Owner Only"
 
@@ -43,25 +34,24 @@ on:
 
 concurrency:
   group: production-deploy
-  cancel-in-progress: false   # never cancel a running production deploy
+  cancel-in-progress: false  # never cancel a running production deploy
 
 permissions:
   contents: read
-  id-token: write   # for OIDC-based targets (AWS, GCP)
+  id-token: write  # needed for OIDC-based providers (AWS, GCP)
 
 env:
   NODE_VERSION: "20"
   BUILD_CMD:    "npm run build"
   USE_PRISMA:   "true"
 
-# =============================================================================
 jobs:
-# ── Guard · Validate intent & environment approval ────────────────────────────
+  # Guard — validate confirmation word + environment reviewer approval
   guard:
     name: "Guard · Confirm Intent"
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    environment: production   # 🔒 GitHub pauses here for reviewer approval
+    environment: production  # GitHub pauses here for reviewer approval
     steps:
       - name: Validate confirmation
         run: |
@@ -71,7 +61,7 @@ jobs:
           fi
           echo "✅ Confirmation accepted."
 
-      - name: Log intent to job summary
+      - name: Log intent
         run: |
           {
             echo "### 🚀 Production Deployment Triggered"
@@ -84,7 +74,7 @@ jobs:
             echo "| **Time** | $(date -u '+%Y-%m-%d %H:%M UTC') |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-# ── Smoke Check · Fresh secret scan + build before touching production ─────────
+  # Smoke check — fresh secret scan + build before touching production
   smoke-check:
     name: "Smoke Check · Pre-Deploy Validation"
     needs: guard
@@ -136,13 +126,13 @@ jobs:
             build.log
             gitleaks-report.json
 
-# ── Deploy · Production ───────────────────────────────────────────────────────
+  # Deploy — run your actual deployment command here
   deploy:
     name: "Deploy · Production"
     needs: smoke-check
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: production   # 🔒 second environment gate (optional — remove if redundant)
+    environment: production
     steps:
       - uses: actions/checkout@v4
         with: { ref: main }
@@ -152,15 +142,15 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      # ── Choose your deploy method — uncomment one block ───────────────────
+      # ── Uncomment ONE of the deploy options below ──────────────────────────
 
-      # Option A · Shopify CLI (Partners / custom app)
+      # Option A — Shopify CLI (Partners / custom app)
       # - name: Shopify deploy
       #   env:
       #     SHOPIFY_CLI_PARTNERS_TOKEN: ${{ secrets.SHOPIFY_CLI_PARTNERS_TOKEN }}
       #   run: npx shopify app deploy --force
 
-      # Option B · Railway CLI
+      # Option B — Railway
       # - name: Railway deploy
       #   env:
       #     RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
@@ -168,23 +158,23 @@ jobs:
       #     npm install -g @railway/cli
       #     railway up --service production
 
-      # Option C · Render deploy hook
+      # Option C — Render deploy hook
       # - name: Render deploy
       #   run: curl -s -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
 
-      # Option D · Docker build + push
+      # Option D — Docker build + push
       # - name: Docker deploy
       #   run: |
       #     echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
       #     docker build -t myapp:production .
       #     docker push myapp:production
 
-      # ── Placeholder (delete once you pick an option above) ────────────────
+      # ── Placeholder — delete this once you pick an option above ───────────
       - name: "⚠️  No deploy command configured"
         run: |
-          echo "::warning::Add your deploy command above. See commented options for Shopify, Railway, Render, and Docker."
+          echo "::warning::Add your deploy command above. See commented options A–D."
 
-      # ── Audit log ─────────────────────────────────────────────────────────
+      # Audit log — permanent record of who deployed what and when
       - name: Post-deploy summary
         if: always()
         run: |
@@ -192,7 +182,7 @@ jobs:
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           {
             echo ""
-            echo "## 🚀 Production Deployment Complete"
+            echo "## Deployment Result"
             echo ""
             echo "| | |"
             echo "|---|---|"
@@ -202,7 +192,4 @@ jobs:
             echo "| **Reason** | ${{ github.event.inputs.reason }} |"
             echo "| **Time** | $(date -u '+%Y-%m-%d %H:%M UTC') |"
             echo "| **Run** | [#${GITHUB_RUN_ID}](${RUN_URL}) |"
-            echo ""
-            echo "---"
-            echo "<sub>Production deployments are permanently audited.</sub>"
           } >> "$GITHUB_STEP_SUMMARY"
