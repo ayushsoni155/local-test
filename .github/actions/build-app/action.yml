@@ -39,3 +39,81 @@ runs:
           BUILD_OK=true
         fi
         echo "build_ok=${BUILD_OK}" >> "$GITHUB_OUTPUT"
+
+    # ── GitHub annotations + step summary ─────────────────────────────────────
+    # Parse build.log for Vite/tsc/rollup error lines and emit ::error
+    # annotations so failures appear inline on the PR diff.
+    #
+    # Vite/Rollup error patterns we handle:
+    #   app/routes/foo.jsx (12:5): error — rollup plugin error
+    #   src/foo.ts:12:5 - error TS2345: …  — tsc inside vite
+    #   [vite:css] … error …               — CSS plugin errors
+    #   ✘ [ERROR] …                        — esbuild errors
+    # ──────────────────────────────────────────────────────────────────────────
+    - name: Report findings (annotations + summary)
+      if: always()
+      shell: bash
+      run: |
+        set -uo pipefail
+        SHORT_SHA="${GITHUB_SHA:0:7}"
+        BUILD_OK="${{ steps.build.outputs.build_ok }}"
+
+        # ── Build error annotations ───────────────────────────────────────────
+        if [ -s build.log ] && [ "$BUILD_OK" != "true" ]; then
+          # Pattern 1: file(line,col): error … (rollup)
+          grep -E '^\S.*\([0-9]+,[0-9]+\):' build.log 2>/dev/null \
+          | sed 's/\r//' \
+          | while IFS= read -r ln; do
+              file=$(echo "$ln" | sed 's/(\([0-9]*\),\([0-9]*\)).*//' | xargs)
+              line=$(echo "$ln" | grep -oP '(?<=\()\d+(?=,)')
+              col=$(echo  "$ln" | grep -oP '(?<=,)\d+(?=\))')
+              msg=$( echo "$ln" | sed 's/.*): //')
+              [ -z "$file" ] && continue
+              printf '::error file=%s,line=%s,col=%s,title=Build Error::%s\n' \
+                "$file" "${line:-1}" "${col:-1}" "$msg"
+            done || true
+
+          # Pattern 2: file:line:col - error TS… (tsc inside vite)
+          grep -E '^[^:]+:[0-9]+:[0-9]+ - error' build.log 2>/dev/null \
+          | sed 's/\r//' \
+          | while IFS= read -r ln; do
+              file=$(echo "$ln" | cut -d: -f1)
+              line=$(echo "$ln" | cut -d: -f2)
+              col=$( echo "$ln" | cut -d: -f3)
+              msg=$( echo "$ln" | cut -d: -f4- | xargs)
+              [ -z "$file" ] && continue
+              printf '::error file=%s,line=%s,col=%s,title=Build TypeScript Error::%s\n' \
+                "$file" "${line:-1}" "${col:-1}" "$msg"
+            done || true
+
+          # Pattern 3: ✘ [ERROR] esbuild errors (line number in next line)
+          grep -E '✘ \[ERROR\]' build.log 2>/dev/null | head -20 \
+          | while IFS= read -r ln; do
+              msg=$(echo "$ln" | sed 's/.*\[ERROR\] //')
+              printf '::error title=Build Error::%s\n' "$msg"
+            done || true
+
+          # Pattern 4: [plugin:…] generic plugin errors
+          grep -E '^\[.+\].*error' build.log 2>/dev/null | head -10 \
+          | while IFS= read -r ln; do
+              printf '::error title=Build Plugin Error::%s\n' "$ln"
+            done || true
+        fi
+
+        # ── Step summary ──────────────────────────────────────────────────────
+        {
+          if [ "$BUILD_OK" = "true" ]; then
+            echo "### Stage 5 · Production Build — ✅ PASSED — commit \`${SHORT_SHA}\`"
+          else
+            echo "### Stage 5 · Production Build — ❌ FAILED — commit \`${SHORT_SHA}\`"
+            echo ""
+            echo "#### Build Errors"
+            echo '```'
+            # Show first 40 lines of errors from build.log
+            grep -E '(error|Error|ERROR|✘)' build.log 2>/dev/null \
+              | grep -v '^npm warn' | head -40 || true
+            echo '```'
+            echo ""
+            echo "> 💡 **Tip:** Check the Annotations tab on this run for inline error locations."
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"

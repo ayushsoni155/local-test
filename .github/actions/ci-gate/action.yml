@@ -248,9 +248,67 @@ runs:
           fi
           echo ""
           echo "<sub>![FAIL](${BASE}/FAIL-${FAIL_C}?style=flat) blocks &nbsp;·&nbsp; ![PASS](${BASE}/PASS-${PASS_C}?style=flat) clean &nbsp;·&nbsp; ![WARN](${BASE}/WARN-${WARN_C}?style=flat) non-blocking &nbsp;·&nbsp; ![SKIP](${BASE}/SKIP-${SKIP_C}?style=flat) not run</sub>"
+
+          # ── Debug guide (only on failure) ─────────────────────────────────
+          if [ "$ANY_BLOCKED" -gt 0 ]; then
+            echo ""
+            echo "---"
+            echo "## 🔍 Where to Find Errors"
+            echo ""
+            echo "| Stage | What failed | Where to look |"
+            echo "|:-----:|:------------|:--------------|"
+
+            if [ "$SECRETS" -gt 0 ]; then
+              echo "| 1 | **${SECRETS} secret(s)** detected | **Annotations tab** → Secret \\[rule\\] in commit · Stage 1 job summary (file + line + commit SHA) |"
+            fi
+            if [ "$DEP_CRITICAL" -gt 0 ]; then
+              echo "| 2 | **${DEP_CRITICAL} npm vuln(s)** critical/high | **Annotations tab** → npm audit \\[critical\\] · Stage 2 job summary (package + CVE + fix version) |"
+            fi
+            if [ "$TRIVY_CRIT" -gt 0 ]; then
+              echo "| 2 | **${TRIVY_CRIT} Trivy finding(s)** | **Annotations tab** → Trivy \\[CRITICAL\\] · Stage 2 job summary (file + CVE + fix) |"
+            fi
+            if [ "$ESL" -gt 0 ]; then
+              echo "| 3 | **${ESL} ESLint error(s)** | **Annotations tab** → ESLint\\[rule\\] inline on PR diff · Stage 3 job summary table (file:line:col) |"
+            fi
+            if [ "$TSE" -gt 0 ]; then
+              echo "| 3 | **${TSE} TypeScript error(s)** | **Annotations tab** → TypeScript TSxxxx inline on PR diff · Stage 3 job summary \`\`\`block |"
+            fi
+            if [ "$TEST_BLOCKED" -gt 0 ]; then
+              echo "| 4 | **${T_FAIL} test failure(s)** | **Annotations tab** → Test Failed: <name> (file:line) · Stage 4 job summary (suite → test → assertion message) |"
+            fi
+            if [ "$CONTEXT" = "staging" ] && [ "$BUILD_BLOCKED" -gt 0 ]; then
+              echo "| 5 | **Production build failed** | **Annotations tab** → Build Error · Stage 5 job summary error log |"
+            fi
+
+            echo ""
+            echo "> 📌 **Pro tip:** On the workflow run page, click the **Annotations** tab (below the job list)"
+            echo "> to see every error pinned to the exact **file → line → column** that caused it."
+            echo "> On a Pull Request, annotations appear **inline on the diff** next to the offending code."
+            echo ""
+            echo "#### Artifact reports (download from this run's Summary page)"
+            echo ""
+            echo "| Artifact | Contents |"
+            echo "|:---------|:---------|"
+            if [ "$SECRETS" -gt 0 ]; then
+              echo "| \`secrets-*\` | \`gitleaks-report.json\`, \`env-committed.txt\`, \`private-keys-detail.tsv\` |"
+            fi
+            if [ "$DEP_CRITICAL" -gt 0 ] || [ "$TRIVY_CRIT" -gt 0 ]; then
+              echo "| \`deps-*\` / \`trivy-*\` | \`npm-audit.json\`, \`trivy-report.json\`, \`trivy-report.sarif\` |"
+            fi
+            if [ "$ESL" -gt 0 ] || [ "$TSE" -gt 0 ]; then
+              echo "| \`static-*\` | \`eslint-report.json\`, \`tsc.log\`, \`prettier.log\` |"
+            fi
+            if [ "$TEST_BLOCKED" -gt 0 ]; then
+              echo "| \`tests-*\` | \`vitest-results.json\`, \`vitest.log\` |"
+            fi
+            if [ "$CONTEXT" = "staging" ] && [ "$BUILD_BLOCKED" -gt 0 ]; then
+              echo "| \`build-*\` | \`build.log\` (full Vite output) |"
+            fi
+          fi
+
           echo ""
           echo "---"
-          echo "<sub>Full reports are attached as build artifacts.</sub>"
+          echo "<sub>Commit \`${SHORT_SHA}\` · Run [#${GITHUB_RUN_ID}](${RUN_URL}) · All artifact reports retained for 14 days.</sub>"
         } >> "$GITHUB_STEP_SUMMARY"
 
     # ─── Gate decision (exit 1 = required status check fails) ────────────────
@@ -271,18 +329,39 @@ runs:
         CONTEXT="${{ inputs.context }}"
 
         BLOCK=0; REASONS=""
-        [ "$SECRETS" -gt 0 ]      && { BLOCK=1; REASONS="${REASONS} secrets(${SECRETS});"; }
-        [ "$DEP_CRITICAL" -gt 0 ] && { BLOCK=1; REASONS="${REASONS} npm-vulns(${DEP_CRITICAL});"; }
-        [ "$TRIVY_CRIT" -gt 0 ]   && { BLOCK=1; REASONS="${REASONS} trivy(${TRIVY_CRIT});"; }
-        [ "$ESL" -gt 0 ]          && { BLOCK=1; REASONS="${REASONS} eslint-errors(${ESL});"; }
-        [ "$TSE" -gt 0 ]          && { BLOCK=1; REASONS="${REASONS} ts-errors(${TSE});"; }
-        [ "$T_PASS" != "true" ]   && { BLOCK=1; REASONS="${REASONS} test-failures(${T_FAIL});"; }
+        if [ "$SECRETS" -gt 0 ]; then
+          BLOCK=1; REASONS="${REASONS} secrets(${SECRETS});"
+          echo "::error title=Stage 1 — Secrets::${SECRETS} secret(s) found in git history. See the Annotations tab for file + line + commit details."
+        fi
+        if [ "$DEP_CRITICAL" -gt 0 ]; then
+          BLOCK=1; REASONS="${REASONS} npm-vulns(${DEP_CRITICAL});"
+          echo "::error title=Stage 2 — npm audit::${DEP_CRITICAL} critical/high npm vulnerability(s). See the Annotations tab for package + fix version details."
+        fi
+        if [ "$TRIVY_CRIT" -gt 0 ]; then
+          BLOCK=1; REASONS="${REASONS} trivy(${TRIVY_CRIT});"
+          echo "::error title=Stage 2 — Trivy::${TRIVY_CRIT} critical/high Trivy finding(s). See the Annotations tab for file + CVE details."
+        fi
+        if [ "$ESL" -gt 0 ]; then
+          BLOCK=1; REASONS="${REASONS} eslint-errors(${ESL});"
+          echo "::error title=Stage 3 — ESLint::${ESL} ESLint error(s). See the Annotations tab for inline file:line:col locations on the PR diff."
+        fi
+        if [ "$TSE" -gt 0 ]; then
+          BLOCK=1; REASONS="${REASONS} ts-errors(${TSE});"
+          echo "::error title=Stage 3 — TypeScript::${TSE} TypeScript type error(s). See the Annotations tab for inline file:line:col locations."
+        fi
+        if [ "$T_PASS" != "true" ]; then
+          BLOCK=1; REASONS="${REASONS} test-failures(${T_FAIL});"
+          echo "::error title=Stage 4 — Vitest::${T_FAIL} test(s) failed. See the Annotations tab for test name + file:line + assertion message."
+        fi
         if [ "$CONTEXT" = "staging" ] && [ "$B_OK" != "true" ]; then
           BLOCK=1; REASONS="${REASONS} build-failed;"
+          echo "::error title=Stage 5 — Production Build::Build failed. See the Annotations tab for file:line error locations and download the build artifact for full output."
         fi
 
         if [ "$BLOCK" -gt 0 ]; then
-          echo "::error::CI Gate FAILED: ${REASONS}"
+          echo ""
+          echo "::error::CI Gate FAILED ▸ ${REASONS% }"
+          echo "         → Open the Annotations tab on this run for exact file:line:col error locations."
           exit 1
         fi
 

@@ -108,3 +108,78 @@ runs:
           echo "critical=$CRITICAL"
           echo "warnings=$WARNINGS"
         } >> "$GITHUB_OUTPUT"
+
+    # ── GitHub annotations + step summary ─────────────────────────────────────
+    - name: Report findings (annotations + summary)
+      if: always()
+      shell: bash
+      run: |
+        set -uo pipefail
+        SHORT_SHA="${GITHUB_SHA:0:7}"
+        F=trivy-report.json
+
+        # ── Trivy vuln + secret annotations ──────────────────────────────────
+        if [ -s "$F" ]; then
+          jq -r '
+            .Results[]? | .Target as $target |
+            .Vulnerabilities[]? |
+            select(.Severity == "CRITICAL" or .Severity == "HIGH") |
+            [ $target, .Severity, (.VulnerabilityID // "?"),
+              (.PkgName // "?"), (.InstalledVersion // "?"),
+              (.FixedVersion // "no fix"), (.Title // "Vulnerability") ] | join("\t")
+          ' "$F" 2>/dev/null \
+          | while IFS=$'\t' read -r target sev cve pkg ver fix title; do
+              printf '::error file=%s,line=1,title=Trivy [%s] %s in %s::%s — %s@%s → fix: %s\n' \
+                "$target" "$sev" "$cve" "$pkg" "$title" "$pkg" "$ver" "$fix"
+            done || true
+
+          jq -r '
+            .Results[]? | .Target as $target | .Secrets[]? |
+            [ $target, (.StartLine // 1 | tostring), (.Title // "Secret"), (.RuleID // "?") ] | join("\t")
+          ' "$F" 2>/dev/null \
+          | while IFS=$'\t' read -r target line title rule; do
+              printf '::error file=%s,line=%s,title=Trivy Secret [%s]::%s — rule: %s\n' \
+                "$target" "$line" "$rule" "$title" "$rule"
+            done || true
+        fi
+
+        # ── Step summary ──────────────────────────────────────────────────────
+        VC=0; VW=0; SC=0; MC=0; MW=0; LIC=0
+        if [ -s "$F" ]; then
+          VC=$( jq '[.Results[]?.Vulnerabilities[]?   | select(.Severity=="CRITICAL" or .Severity=="HIGH")] | length' "$F" 2>/dev/null || echo 0)
+          VW=$( jq '[.Results[]?.Vulnerabilities[]?   | select(.Severity=="MEDIUM"   or .Severity=="LOW")]  | length' "$F" 2>/dev/null || echo 0)
+          SC=$( jq '[.Results[]?.Secrets[]?]           | length' "$F" 2>/dev/null || echo 0)
+          MC=$( jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="CRITICAL" or .Severity=="HIGH")] | length' "$F" 2>/dev/null || echo 0)
+          MW=$( jq '[.Results[]?.Misconfigurations[]? | select(.Severity=="MEDIUM"   or .Severity=="LOW")]  | length' "$F" 2>/dev/null || echo 0)
+          LIC=$(jq '[.Results[]?.Licenses[]?]          | length' "$F" 2>/dev/null || echo 0)
+        fi
+
+        {
+          echo "### Stage 2 · Trivy Scan — commit \`${SHORT_SHA}\`"
+          echo ""
+          echo "| Category | Critical/High (blocking) | Med/Low (warning) |"
+          echo "|:---------|:------------------------:|:-----------------:|"
+          echo "| Vulnerabilities | ${VC} | ${VW} |"
+          echo "| Secrets | ${SC} | — |"
+          echo "| Misconfigurations | ${MC} | ${MW} |"
+          echo "| License issues | — | ${LIC} |"
+
+          BLOCK=$((VC + SC + MC))
+          if [ "$BLOCK" -gt 0 ] && [ -s "$F" ]; then
+            echo ""
+            echo "#### Critical / High Findings"
+            echo "| File | Severity | CVE / Rule | Package | Installed | Fix |"
+            echo "|:-----|:---------|:-----------|:--------|:----------|:----|"
+            jq -r '
+              .Results[]? | .Target as $t |
+              (
+                (.Vulnerabilities[]? | select(.Severity=="CRITICAL" or .Severity=="HIGH") |
+                  "| `" + $t + "` | " + .Severity + " | `" + (.VulnerabilityID // "?") +
+                  "` | `" + (.PkgName // "?") + "` | " + (.InstalledVersion // "?") +
+                  " | " + (.FixedVersion // "no fix") + " |"),
+                (.Secrets[]? |
+                  "| `" + $t + "` | SECRET | `" + (.RuleID // "?") + "` | — | — | — |")
+              )
+            ' "$F" 2>/dev/null | head -30 || true
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
