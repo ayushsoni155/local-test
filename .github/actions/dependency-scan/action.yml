@@ -1,52 +1,37 @@
 name: "Dependency Scan"
-description: >
-  Audits npm dependencies for known vulnerabilities (npm audit), outdated
-  packages (npm outdated), and deprecation notices. Classifies findings into
-  `critical` (critical + high severity vulnerabilities -> should block) and
-  `warnings` (moderate/low vulns + outdated + deprecated -> warn only).
-  This action never fails the build; the CALLER decides what blocks.
+description: "npm audit + outdated + deprecated checks. Splits findings into `critical` (critical/high vulns, blocking) and `warnings`. Never fails the job — the gate decides."
 
 outputs:
   critical:
-    description: "Count of critical + high severity vulnerabilities (blocking)."
+    description: "Critical + high severity vulnerabilities (blocking)."
     value: ${{ steps.evaluate.outputs.critical }}
   warnings:
-    description: "Count of non-blocking issues (moderate/low vulns, outdated, deprecated)."
+    description: "Non-blocking issues (moderate/low vulns, outdated, deprecated)."
     value: ${{ steps.evaluate.outputs.warnings }}
 
 runs:
   using: composite
   steps:
-    # ------------------------------------------------------------------------
-    # npm audit using ONLY the lockfile — no install, no lifecycle scripts,
-    # so this is fast and safe. JSON captured for the report.
-    # ------------------------------------------------------------------------
+    # Lockfile-only audit — no install, no lifecycle scripts. Fast and safe.
     - name: npm audit
       shell: bash
       run: |
         set -uo pipefail
         npm audit --package-lock-only --audit-level=low --json \
           > npm-audit.json 2>npm-audit.log \
-          || echo "npm audit exited non-zero (vulnerabilities present; captured for evaluation)"
+          || echo "npm audit exited non-zero (vulnerabilities present; captured)"
 
-    # ------------------------------------------------------------------------
-    # Outdated / old versions. `npm outdated` exits non-zero when anything is
-    # outdated, so we swallow it. --package-lock-only avoids a full install.
-    # ------------------------------------------------------------------------
+    # npm outdated exits non-zero when anything is outdated, so swallow it.
     - name: npm outdated
       shell: bash
       run: |
         set -uo pipefail
         npm outdated --package-lock-only --json \
           > npm-outdated.json 2>npm-outdated.log \
-          || echo "npm outdated reported outdated packages (captured for evaluation)"
-        # Normalise an empty result to an empty JSON object.
+          || echo "npm outdated reported outdated packages (captured)"
         if [ ! -s npm-outdated.json ]; then echo '{}' > npm-outdated.json; fi
 
-    # ------------------------------------------------------------------------
-    # Deprecation notices. npm prints "npm warn deprecated <pkg>: <reason>"
-    # during a dry-run install; capture and de-duplicate them.
-    # ------------------------------------------------------------------------
+    # Capture dedup'd "npm warn deprecated" notices from a dry-run install.
     - name: Detect deprecated packages
       shell: bash
       run: |
@@ -62,10 +47,8 @@ runs:
           echo "No deprecated dependencies found."
         fi
 
-    # ------------------------------------------------------------------------
-    # Classify findings into blocking (critical+high) vs warnings.
-    # ------------------------------------------------------------------------
-    - name: Evaluate Dependencies
+    # Classify: critical = critical+high vulns; warnings = everything else.
+    - name: Evaluate
       id: evaluate
       shell: bash
       run: |
@@ -102,7 +85,7 @@ runs:
           echo "warnings=$WARNINGS"
         } >> "$GITHUB_OUTPUT"
 
-    # ── GitHub annotations + step summary ─────────────────────────────────────
+    # One ::error annotation per critical/high vuln + a summary table.
     - name: Report findings (annotations + summary)
       if: always()
       shell: bash
@@ -110,8 +93,6 @@ runs:
         set -uo pipefail
         SHORT_SHA="${GITHUB_SHA:0:7}"
 
-        # ── npm audit annotations ─────────────────────────────────────────────
-        # Emit one ::error per critical/high vulnerability with package + fix info.
         if [ -s npm-audit.json ]; then
           jq -r '
             .vulnerabilities // {} | to_entries[] |
@@ -130,7 +111,6 @@ runs:
             done || true
         fi
 
-        # ── Step summary ──────────────────────────────────────────────────────
         CRIT=0; HIGH=0; MOD=0; LOW=0
         if [ -s npm-audit.json ]; then
           CRIT=$(jq '.metadata.vulnerabilities.critical // 0' npm-audit.json 2>/dev/null || echo 0)
@@ -153,7 +133,6 @@ runs:
           echo "| 📦 Outdated packages | ${OUTDATED} |"
           echo "| ⚠️ Deprecated packages | ${DEPR} |"
 
-          # Detail table for critical+high
           BLOCK=$((CRIT + HIGH))
           if [ "$BLOCK" -gt 0 ] && [ -s npm-audit.json ]; then
             echo ""
@@ -171,7 +150,6 @@ runs:
             ' npm-audit.json 2>/dev/null | head -30 || true
           fi
 
-          # Outdated detail
           if [ "$OUTDATED" -gt 0 ] && [ -s npm-outdated.json ]; then
             echo ""
             echo "#### Outdated Packages"

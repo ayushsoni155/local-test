@@ -1,14 +1,9 @@
 name: "Build Application"
-description: >
-  Optionally generates the Prisma client, then runs the production build
-  command. Used in staging-ci Stage 5 and the production-deploy smoke
-  check — centralising build logic so both always stay in sync.
-  Emits a `build_ok` output ('true'/'false'). Never fails the build
-  itself — the caller aborts on failure.
+description: "Optionally run prisma generate, then the production build. Emits `build_ok` ('true'/'false'). Never fails the job — the gate decides."
 
 inputs:
   build-cmd:
-    description: "Production build command (e.g. `npm run build`)."
+    description: "Production build command."
     required: false
     default: "npm run build"
   use-prisma:
@@ -40,16 +35,8 @@ runs:
         fi
         echo "build_ok=${BUILD_OK}" >> "$GITHUB_OUTPUT"
 
-    # ── GitHub annotations + step summary ─────────────────────────────────────
-    # Parse build.log for Vite/tsc/rollup error lines and emit ::error
-    # annotations so failures appear inline on the PR diff.
-    #
-    # Vite/Rollup error patterns we handle:
-    #   app/routes/foo.jsx (12:5): error — rollup plugin error
-    #   src/foo.ts:12:5 - error TS2345: …  — tsc inside vite
-    #   [vite:css] … error …               — CSS plugin errors
-    #   ✘ [ERROR] …                        — esbuild errors
-    # ──────────────────────────────────────────────────────────────────────────
+    # On failure, turn the build.log into inline ::error annotations (Vite/Rollup,
+    # tsc-in-vite, esbuild and plugin error shapes) plus a summary excerpt.
     - name: Report findings (annotations + summary)
       if: always()
       shell: bash
@@ -58,9 +45,8 @@ runs:
         SHORT_SHA="${GITHUB_SHA:0:7}"
         BUILD_OK="${{ steps.build.outputs.build_ok }}"
 
-        # ── Build error annotations ───────────────────────────────────────────
         if [ -s build.log ] && [ "$BUILD_OK" != "true" ]; then
-          # Pattern 1: file(line,col): error … (rollup)
+          # file(line,col): error …  (rollup)
           grep -E '^\S.*\([0-9]+,[0-9]+\):' build.log 2>/dev/null \
           | sed 's/\r//' \
           | while IFS= read -r ln; do
@@ -73,7 +59,7 @@ runs:
                 "$file" "${line:-1}" "${col:-1}" "$msg"
             done || true
 
-          # Pattern 2: file:line:col - error TS… (tsc inside vite)
+          # file:line:col - error TS…  (tsc inside vite)
           grep -E '^[^:]+:[0-9]+:[0-9]+ - error' build.log 2>/dev/null \
           | sed 's/\r//' \
           | while IFS= read -r ln; do
@@ -86,21 +72,20 @@ runs:
                 "$file" "${line:-1}" "${col:-1}" "$msg"
             done || true
 
-          # Pattern 3: ✘ [ERROR] esbuild errors (line number in next line)
+          # ✘ [ERROR] …  (esbuild)
           grep -E '✘ \[ERROR\]' build.log 2>/dev/null | head -20 \
           | while IFS= read -r ln; do
               msg=$(echo "$ln" | sed 's/.*\[ERROR\] //')
               printf '::error title=Build Error::%s\n' "$msg"
             done || true
 
-          # Pattern 4: [plugin:…] generic plugin errors
+          # [plugin:…] … error  (generic plugin)
           grep -E '^\[.+\].*error' build.log 2>/dev/null | head -10 \
           | while IFS= read -r ln; do
               printf '::error title=Build Plugin Error::%s\n' "$ln"
             done || true
         fi
 
-        # ── Step summary ──────────────────────────────────────────────────────
         {
           if [ "$BUILD_OK" = "true" ]; then
             echo "### Stage 5 · Production Build — ✅ PASSED — commit \`${SHORT_SHA}\`"
@@ -109,7 +94,6 @@ runs:
             echo ""
             echo "#### Build Errors"
             echo '```'
-            # Show first 40 lines of errors from build.log
             grep -E '(error|Error|ERROR|✘)' build.log 2>/dev/null \
               | grep -v '^npm warn' | head -40 || true
             echo '```'

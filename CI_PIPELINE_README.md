@@ -1,27 +1,19 @@
-# Shopify Custom App — CI/CD Pipeline
+# Shopify Custom App — PR CI Gate
 
-A production-ready, modular CI/CD pipeline for Shopify custom apps built with React Router, Prisma, and Vitest. Drop this into any Shopify project and change only 4–5 lines to make it yours.
+A modular CI gate for Shopify custom apps built with React Router, Prisma, and Vitest. It runs on every pull request to `main` and produces a single required status check that blocks the merge until everything passes.
 
 ---
 
 ## How It Works
 
-The pipeline has **3 workflows** that run in sequence based on git events:
-
 ```
-Developer pushes code
+Developer pushes to a feature branch
         │
         ▼
-[feature branch] → PR to main
+   Opens PR → main
         │
         ▼
-  feature-ci.yml ──→ 4 stages run → Gate must pass → Owner reviews → Merge
-        │
-        ▼
-  staging-ci.yml ──→ 5 stages run → Gate must pass → Deploy allowed
-        │
-        ▼
-  production-deploy.yml ──→ Manual trigger → Owner approves → Deployed
+  pr-to-main.yml ──→ 5 stages run → Gate must pass → Owner reviews → Merge
 ```
 
 ### Who can do what
@@ -32,14 +24,13 @@ Developer pushes code
 | Open PR to main | ✅ | ✅ |
 | Merge PR to main | ❌ | ✅ (only after CI passes) |
 | Push directly to main | ❌ | ❌ (enforced by ruleset) |
-| Trigger production deploy | ❌ | ✅ |
 
 ---
 
 ## Pipeline Stages
 
-### Workflow 1 — Feature CI (`feature-ci.yml`)
-Triggered on every PR to `main`. All 4 stages run sequentially — a failure in any stage stops the chain.
+### `pr-to-main.yml` — PR CI Gate
+Triggered on every PR to `main`. The 5 stages run sequentially — a critical finding in any stage stops the chain, and the gate reports it.
 
 | Stage | Tool(s) | Blocks merge? |
 |:-----:|:--------|:-------------:|
@@ -47,38 +38,22 @@ Triggered on every PR to `main`. All 4 stages run sequentially — a failure in 
 | 2 · Dependencies | npm audit + Trivy (vulns / secrets / misconfigs) | ✅ Yes (critical/high only) |
 | 3 · Static analysis | ESLint + TypeScript (`tsc --noEmit`) + Prettier | ✅ Yes (errors only) |
 | 4 · Unit tests | Vitest | ✅ Yes |
+| 5 · Production build | `npm run build` (Prisma generate + React Router build) | ✅ Yes |
 | Gate | Single required status check | ✅ Required by ruleset |
 
-### Workflow 2 — Staging CI (`staging-ci.yml`)
-Triggered on every push to `main` (i.e. after a merge). Adds a 5th stage — the production build.
-
-| Stage | Tool(s) | Blocks deploy? |
-|:-----:|:--------|:--------------:|
-| 1–4 | Same as Feature CI | ✅ Yes |
-| 5 · Build | `npm run build` (Vite) | ✅ Yes |
-| Gate | Single required status check | ✅ Required by ruleset |
-
-### Workflow 3 — Production Deploy (`production-deploy.yml`)
-Manual trigger only. Nobody can run it from a feature branch.
-
-```
-1. Actor types DEPLOY in the confirmation box
-2. GitHub pauses → Owner must approve in the environment gate
-3. Fresh secret scan + build runs on HEAD of main
-4. Deploy command runs (Shopify CLI / Railway / Render / Docker)
-5. Audit log written to the job summary permanently
-```
+> The gate also fails if any stage **crashes** (infra/setup error such as a failed `npm ci`), so a stage that never ran can't slip through as green.
 
 ---
 
 ## What Each Report Shows
 
-Every CI run generates a **Job Summary** that you can read without opening any log files:
+Every CI run generates a **Job Summary** you can read without opening any log files:
 
 - **Stage 1** — table of scanner findings (Gitleaks, TruffleHog, .env files, private keys)
 - **Stage 2** — vulnerability table (severity × package × CVE × fix version)
 - **Stage 3** — ESLint errors by file:line:col, TypeScript errors, Prettier drift
 - **Stage 4** — test results (passed / failed / skipped) with failure details
+- **Stage 5** — production build result (pass/fail) with an error excerpt on failure
 - **Gate** — final verdict badge table + "Where to Find Errors" debug guide
 
 Errors also appear as **GitHub Annotations** — inline on the PR diff next to the exact line of code.
@@ -94,9 +69,7 @@ Copy the entire `.github/` folder into your Shopify project:
 ```
 .github/
 ├── workflows/
-│   ├── feature-ci.yml         # PR gate
-│   ├── staging-ci.yml         # post-merge validation
-│   └── production-deploy.yml  # manual owner-only deploy
+│   └── pr-to-main.yml         # PR gate
 ├── actions/
 │   ├── setup-node/            # Node install + npm ci
 │   ├── secret-scan/           # Gitleaks + TruffleHog
@@ -104,87 +77,37 @@ Copy the entire `.github/` folder into your Shopify project:
 │   ├── trivy-scan/            # Trivy filesystem scan
 │   ├── static-analysis/       # ESLint + tsc + Prettier
 │   ├── run-tests/             # Vitest
-│   ├── build-app/             # npm run build
+│   ├── build-app/             # Prisma generate + production build
 │   └── ci-gate/               # report + pass/fail decision
 └── rulesets/
-    ├── protect-main.json      # import → Settings → Rules
-    ├── protect-staging.json
-    └── feature-branch-safety.json
+    └── protect-main.json      # import → Settings → Rules
 ```
 
-### Step 2 — Edit the 4 knobs
+### Step 2 — Edit the knobs
 
-Open each workflow file and change only the `env:` block at the top:
+Open `pr-to-main.yml` and change only the `env:` block at the top:
 
-**`feature-ci.yml`** and **`staging-ci.yml`**:
 ```yaml
 env:
-  NODE_VERSION: "20"                          # ← your Node version
+  NODE_VERSION: "20"                                 # ← your Node version
   VITEST_CMD:   "npx vitest run --reporter=verbose"  # ← your test command
-  BUILD_CMD:    "npm run build"               # ← your build command (staging only)
-  USE_PRISMA:   "true"                        # ← "false" if no Prisma
+  BUILD_CMD:    "npm run build"                      # ← your build command
+  USE_PRISMA:   "true"                               # ← "false" if no Prisma
+  SKIP_TESTS:   ${{ vars.SKIP_TESTS || 'false' }}    # ← repo variable toggle
 ```
 
-**`production-deploy.yml`**:
-```yaml
-env:
-  NODE_VERSION: "20"        # ← your Node version
-  BUILD_CMD:    "npm run build"
-  USE_PRISMA:   "true"
-```
+### Step 3 — Import the branch protection ruleset
 
-### Step 3 — Add your deploy command
-
-In `production-deploy.yml`, find the `# Deploy` job and uncomment **one** option:
-
-```yaml
-# Option A — Shopify CLI
-- name: Shopify deploy
-  env:
-    SHOPIFY_CLI_PARTNERS_TOKEN: ${{ secrets.SHOPIFY_CLI_PARTNERS_TOKEN }}
-  run: npx shopify app deploy --force
-
-# Option B — Railway
-# Option C — Render deploy hook
-# Option D — Docker
-```
-
-### Step 4 — Create the GitHub Environment
-
-Go to **Settings → Environments → New environment** → name it `production`.
-
-- ✅ **Required reviewers** — add your GitHub username
-- ✅ **Deployment branches** — restrict to `main` only
-
-This is the gate that blocks production deploys until an owner approves.
-
-### Step 5 — Add secrets
-
-Go to **Settings → Secrets and variables → Actions** and add the secret for your deploy method:
-
-| Deploy method | Secret name |
-|:-------------|:------------|
-| Shopify CLI | `SHOPIFY_CLI_PARTNERS_TOKEN` |
-| Railway | `RAILWAY_TOKEN` |
-| Render | `RENDER_DEPLOY_HOOK_URL` |
-| Docker Hub | `DOCKER_USERNAME` + `DOCKER_PASSWORD` |
-
-### Step 6 — Import branch protection rulesets
-
-Go to **Settings → Rules → Rulesets → ▼ New ruleset → Import a ruleset**.
-
-Import these files one by one from `.github/rulesets/`:
+Go to **Settings → Rules → Rulesets → ▼ New ruleset → Import a ruleset** and import `.github/rulesets/protect-main.json`.
 
 | File | Protects | Key rules |
 |:-----|:---------|:----------|
 | `protect-main.json` | `main` branch | No direct push · PR required · CI gate must pass · 1 review |
-| `protect-staging.json` | `staging` branch | Same + staging CI gate |
-| `feature-branch-safety.json` | `feature/**`, `fix/**`, etc. | No force push |
 
-> **After importing `protect-main.json`**, go into the ruleset and set the required status check name exactly to:
+> **After importing**, open the ruleset and confirm the required status check name is exactly:
 > `CI Gate · Feature → Main`
 
-### Step 7 — Set up Vitest (if you haven't)
+### Step 4 — Set up Vitest (if you haven't)
 
 Add to `package.json`:
 ```json
@@ -222,7 +145,7 @@ export default defineConfig({
 
 Write tests in `app/test/` or co-locate them as `*.test.js` next to source files.
 
-### Step 8 — Skip tests while you write them
+### Step 5 — Skip tests while you write them
 
 If you're not ready with tests yet, set a repository variable:
 
@@ -360,13 +283,11 @@ Add the Vitest override block to `.eslintrc.cjs` as shown in the ESLint section 
 
 ## Required GitHub Permissions
 
-The workflow tokens need these permissions (already set in the workflow files):
+The workflow token only needs read access (already set in the workflow file):
 
-| Workflow | `contents` | `pull-requests` | `id-token` |
-|:---------|:----------:|:---------------:|:----------:|
-| feature-ci.yml | read | write | — |
-| staging-ci.yml | read | — | — |
-| production-deploy.yml | read | — | write |
+| Workflow | `contents` |
+|:---------|:----------:|
+| pr-to-main.yml | read |
 
 ---
 
@@ -375,9 +296,7 @@ The workflow tokens need these permissions (already set in the workflow files):
 ```
 .github/
 ├── workflows/
-│   ├── feature-ci.yml          PR gate — runs on pull_request to main
-│   ├── staging-ci.yml          Post-merge validation — runs on push to main
-│   └── production-deploy.yml   Manual deploy — runs on workflow_dispatch
+│   └── pr-to-main.yml           PR gate — runs on pull_request to main
 │
 ├── actions/
 │   ├── setup-node/             Installs Node + runs npm ci
@@ -386,13 +305,11 @@ The workflow tokens need these permissions (already set in the workflow files):
 │   ├── trivy-scan/             Trivy filesystem (vuln / secret / misconfig)
 │   ├── static-analysis/        ESLint + tsc + Prettier + annotations
 │   ├── run-tests/              Vitest + JSON report + annotations
-│   ├── build-app/              Prisma generate + npm run build
+│   ├── build-app/              Prisma generate + production build
 │   └── ci-gate/                Aggregates all stage results, writes summary, exits 1 on failure
 │
 └── rulesets/
-    ├── protect-main.json        Import → protects main branch
-    ├── protect-staging.json     Import → protects staging branch
-    └── feature-branch-safety.json  Import → prevents force-push on feature branches
+    └── protect-main.json        Import → protects main branch
 ```
 
 ---
@@ -400,11 +317,8 @@ The workflow tokens need these permissions (already set in the workflow files):
 ## Quick Checklist
 
 - [ ] Copy `.github/` folder into your repo
-- [ ] Set `NODE_VERSION`, `VITEST_CMD`, `BUILD_CMD`, `USE_PRISMA` in each workflow
-- [ ] Uncomment your deploy method in `production-deploy.yml`
-- [ ] Create `production` GitHub Environment with required reviewers
-- [ ] Add deploy secret (e.g. `SHOPIFY_CLI_PARTNERS_TOKEN`)
-- [ ] Import the 3 ruleset JSON files in GitHub Settings
+- [ ] Set `NODE_VERSION`, `VITEST_CMD`, `BUILD_CMD`, `USE_PRISMA` in `pr-to-main.yml`
+- [ ] Import `protect-main.json` in GitHub Settings → Rules
 - [ ] Set required status check name in `protect-main` ruleset: `CI Gate · Feature → Main`
 - [ ] (Optional) Set `SKIP_TESTS=true` repo variable while writing tests
 - [ ] Add Vitest globals override to `.eslintrc.cjs`

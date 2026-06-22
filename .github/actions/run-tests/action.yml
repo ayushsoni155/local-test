@@ -1,12 +1,9 @@
-name: "Run Vitest Test Suite"
-description: >
-  Runs the Vitest test suite with a JSON reporter so results can be
-  parsed. Emits `tests_passed` and `test_failures` outputs. Never fails
-  the build itself — the caller's gate job decides what to block on.
+name: "Run Vitest"
+description: "Run Vitest with a JSON reporter and expose tests_passed + test_failures. Never fails the job — the gate decides."
 
 inputs:
   vitest-cmd:
-    description: "Vitest command to run (e.g. `npx vitest run --reporter=verbose`)."
+    description: "Vitest command to run."
     required: false
     default: "npx vitest run --reporter=verbose"
 
@@ -34,7 +31,7 @@ runs:
           echo "tests_passed=true" >> "$GITHUB_OUTPUT"
           echo "test_failures=0"   >> "$GITHUB_OUTPUT"
         else
-          # Parse failure count from JSON; fall back to the raw exit code.
+          # Count failures from the JSON; fall back to the raw exit code.
           FAIL_COUNT=$(jq \
             '.testResults | map(.assertionResults[] | select(.status=="failed")) | length' \
             vitest-results.json 2>/dev/null || echo "$EXIT")
@@ -42,10 +39,8 @@ runs:
           echo "test_failures=${FAIL_COUNT}" >> "$GITHUB_OUTPUT"
         fi
 
-    # ── GitHub annotations + step summary ─────────────────────────────────────
-    # Emit ::error annotations per test failure so they appear inline on the
-    # PR diff and Annotations tab with exact file, line, test name, and message.
-    # ──────────────────────────────────────────────────────────────────────────
+    # One ::error annotation per failed test (file, line, name, message) plus a
+    # summary table, so failures show inline on the PR diff.
     - name: Report findings (annotations + summary)
       if: always()
       shell: bash
@@ -53,7 +48,6 @@ runs:
         set -uo pipefail
         SHORT_SHA="${GITHUB_SHA:0:7}"
 
-        # ── Per-failure annotations ───────────────────────────────────────────
         if [ -s vitest-results.json ]; then
           jq -r '
             .testResults[]? |
@@ -75,7 +69,6 @@ runs:
             done || true
         fi
 
-        # ── Step summary ──────────────────────────────────────────────────────
         TOTAL=0; PASSED=0; FAILED=0; SKIPPED=0
         if [ -s vitest-results.json ]; then
           TOTAL=$(  jq '[.testResults[]?.assertionResults[]?] | length'                          vitest-results.json 2>/dev/null || echo 0)
