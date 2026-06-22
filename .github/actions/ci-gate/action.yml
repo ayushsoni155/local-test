@@ -1,20 +1,11 @@
 name: "CI Gate — Report & Decision"
 description: >
-  Consumes all stage outputs, writes a colour-coded job summary (badge
-  table + verdict + blocking reasons), and exits non-zero if any
-  blocking finding exists. Used by the gate job in both feature-ci and
-  staging-ci so the evaluation logic lives in exactly one place.
-
-  Supports two contexts:
-    pr      — pull request gate (4 stages, shows PR number + head ref)
-    staging — push-to-main gate (5 stages, includes build result)
+  Consumes all PR stage outputs, writes a colour-coded job summary (badge
+  table + verdict + blocking reasons), and exits non-zero if any blocking
+  finding exists. Used by the gate job in pr-to-main so the evaluation
+  logic lives in exactly one place.
 
 inputs:
-  # ── context ────────────────────────────────────────────────────────────────
-  context:
-    description: "'pr' for pull-request gate, 'staging' for staging pipeline gate."
-    required: true
-
   # ── stage run flags (drives SKIP badges) ───────────────────────────────────
   stage2_ran:
     description: "Whether Stage 2 ran ('true'/'false')."
@@ -29,7 +20,7 @@ inputs:
     required: false
     default: "false"
   stage5_ran:
-    description: "Whether Stage 5 ran ('true'/'false'). Only meaningful in staging context."
+    description: "Whether Stage 5 (build) ran ('true'/'false')."
     required: false
     default: "false"
 
@@ -83,17 +74,17 @@ inputs:
     required: false
     default: "false"
   build_ok:
-    description: "Whether the production build succeeded ('true'/'false'). Staging only."
+    description: "'true' if the production build succeeded (or did not run)."
     required: false
     default: "true"
 
-  # ── PR-context extras ──────────────────────────────────────────────────────
+  # ── PR context ───────────────────────────────────────────────────────────
   pr_number:
-    description: "PR number (pr context only)."
+    description: "PR number."
     required: false
     default: ""
   head_ref:
-    description: "Feature branch name (pr context only)."
+    description: "Feature branch name."
     required: false
     default: ""
 
@@ -124,17 +115,12 @@ runs:
         S2="${{ inputs.stage2_ran }}"; S3="${{ inputs.stage3_ran }}"
         S4="${{ inputs.stage4_ran }}"; S5="${{ inputs.stage5_ran }}"
 
-        CONTEXT="${{ inputs.context }}"
-
         # ── aggregates ───────────────────────────────────────────────────────
         S2_CRIT=$((DEP_CRITICAL + TRIVY_CRIT))
         S2_WARN=$((DEP_WARN + TRIVY_WARN))
         TOTAL_CRIT=$((SECRETS + DEP_CRITICAL + TRIVY_CRIT + S_CRIT))
-        TEST_BLOCKED=0; [ "$T_PASS" != "true" ] && TEST_BLOCKED=1
-        BUILD_BLOCKED=0
-        if [ "$CONTEXT" = "staging" ]; then
-          [ "$B_OK" != "true" ] && BUILD_BLOCKED=1
-        fi
+        TEST_BLOCKED=0;  [ "$T_PASS" != "true" ] && TEST_BLOCKED=1
+        BUILD_BLOCKED=0; [ "$B_OK" != "true" ]   && BUILD_BLOCKED=1
         ANY_BLOCKED=$(( TOTAL_CRIT + TEST_BLOCKED + BUILD_BLOCKED ))
 
         # ── badge helpers ────────────────────────────────────────────────────
@@ -180,36 +166,21 @@ runs:
         SHORT_SHA="${GITHUB_SHA:0:7}"
         RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
-        # ── header ───────────────────────────────────────────────────────────
-        if [ "$CONTEXT" = "pr" ]; then
-          TITLE="# Feature CI · PR #${{ inputs.pr_number }}"
-          META_ROW="| **Branch** | \`${{ inputs.head_ref }}\` → \`main\` |"
-        else
-          TITLE="# Staging Pipeline · \`main\` @ \`${SHORT_SHA}\`"
-          META_ROW="| **Triggered by** | Push to \`main\` (merge) |"
-        fi
-
         {
-          echo "$TITLE"
+          echo "# Feature CI · PR #${{ inputs.pr_number }}"
           echo ""
           echo "| | |"
           echo "|---|---|"
           echo "| **Commit** | \`${SHORT_SHA}\` |"
-          echo "$META_ROW"
+          echo "| **Branch** | \`${{ inputs.head_ref }}\` → \`main\` |"
           echo "| **Run** | [#${GITHUB_RUN_ID}](${RUN_URL}) |"
           echo ""
 
           # ── verdict ────────────────────────────────────────────────────────
           if [ "$ANY_BLOCKED" -gt 0 ]; then
-            if [ "$CONTEXT" = "pr" ]; then
-              echo "## ❌ Result: BLOCKED — merge NOT allowed"
-              echo ""
-              echo "Fix the blocking items below, then re-push to the feature branch."
-            else
-              echo "## ❌ Staging validation FAILED"
-              echo ""
-              echo "The main branch did not pass all checks. **Production deployment is blocked.**"
-            fi
+            echo "## ❌ Result: BLOCKED — merge NOT allowed"
+            echo ""
+            echo "Fix the blocking items below, then re-push to the feature branch."
             echo ""
             echo "**Blocking issues:**"
             [ "$SECRETS" -gt 0 ]      && echo "- 🔑 Secrets — ${SECRETS} finding(s) _(Stage 1)_"
@@ -224,20 +195,11 @@ runs:
                 echo "- 🧪 Vitest — suite/import error (0 tests ran — check Stage 4 job log) _(Stage 4)_"
               fi
             fi
-            if [ "$CONTEXT" = "staging" ] && [ "$BUILD_BLOCKED" -gt 0 ]; then
-              echo "- 🏗 Production build FAILED _(Stage 5)_"
-            fi
+            [ "$BUILD_BLOCKED" -gt 0 ] && echo "- 🏗 Production build FAILED _(Stage 5)_"
           else
-            if [ "$CONTEXT" = "pr" ]; then
-              echo "## ✅ Result: PASSED — owner can merge"
-              echo ""
-              echo "All checks passed. A repository owner may now merge this PR."
-            else
-              echo "## ✅ Staging validation PASSED"
-              echo ""
-              echo "All checks passed. The main branch is healthy."
-              echo "A repository owner can now trigger a production deployment."
-            fi
+            echo "## ✅ Result: PASSED — owner can merge"
+            echo ""
+            echo "All checks passed. A repository owner may now merge this PR."
           fi
 
           echo ""
@@ -249,9 +211,7 @@ runs:
           echo "| 2 | Dependencies &amp; Trivy | $(cell "$S2_CRIT" "$S2") | $(warn_cell "$S2_WARN") |"
           echo "| 3 | Static analysis (ESLint / TS / Prettier) | $(cell "$S_CRIT" "$S3") | $(warn_cell "$S_WARN") |"
           echo "| 4 | Unit tests (Vitest) | $(tests_cell "$T_PASS" "$S4") | — |"
-          if [ "$CONTEXT" = "staging" ]; then
-            echo "| 5 | Production build | $(cell "$([ "$B_OK" = "true" ] && echo 0 || echo 1)" "$S5") | — |"
-          fi
+          echo "| 5 | Production build | $(cell "$([ "$B_OK" = "true" ] && echo 0 || echo 1)" "$S5") | — |"
           echo ""
           echo "<sub>![FAIL](${BASE}/FAIL-${FAIL_C}?style=flat) blocks &nbsp;·&nbsp; ![PASS](${BASE}/PASS-${PASS_C}?style=flat) clean &nbsp;·&nbsp; ![WARN](${BASE}/WARN-${WARN_C}?style=flat) non-blocking &nbsp;·&nbsp; ![SKIP](${BASE}/SKIP-${SKIP_C}?style=flat) not run</sub>"
 
@@ -279,14 +239,14 @@ runs:
             if [ "$TSE" -gt 0 ]; then
               echo "| 3 | **${TSE} TypeScript error(s)** | **Annotations tab** → TypeScript TSxxxx inline on PR diff · Stage 3 job summary \`\`\`block |"
             fi
-          if [ "$TEST_BLOCKED" -gt 0 ]; then
+            if [ "$TEST_BLOCKED" -gt 0 ]; then
               if [ "$T_FAIL" -gt 0 ]; then
                 echo "| 4 | **${T_FAIL} test failure(s)** | **Annotations tab** → Test Failed: <name> (file:line) · Stage 4 job summary (suite → test → assertion message) |"
               else
                 echo "| 4 | **Test suite errored** (0 tests ran) | Stage 4 **job log** → look for import/module errors before any test output |"
               fi
             fi
-            if [ "$CONTEXT" = "staging" ] && [ "$BUILD_BLOCKED" -gt 0 ]; then
+            if [ "$BUILD_BLOCKED" -gt 0 ]; then
               echo "| 5 | **Production build failed** | **Annotations tab** → Build Error · Stage 5 job summary error log |"
             fi
 
@@ -300,25 +260,25 @@ runs:
             echo "| Artifact | Contents |"
             echo "|:---------|:---------|"
             if [ "$SECRETS" -gt 0 ]; then
-              echo "| \`secrets-*\` | \`gitleaks-report.json\`, \`env-committed.txt\`, \`private-keys-detail.tsv\` |"
+              echo "| \`pr-secrets-*\` | \`gitleaks-report.json\`, \`env-committed.txt\`, \`private-keys-detail.tsv\` |"
             fi
             if [ "$DEP_CRITICAL" -gt 0 ] || [ "$TRIVY_CRIT" -gt 0 ]; then
-              echo "| \`deps-*\` / \`trivy-*\` | \`npm-audit.json\`, \`trivy-report.json\`, \`trivy-report.sarif\` |"
+              echo "| \`pr-deps-*\` | \`npm-audit.json\`, \`trivy-report.json\`, \`trivy-report.sarif\` |"
             fi
             if [ "$ESL" -gt 0 ] || [ "$TSE" -gt 0 ]; then
-              echo "| \`static-*\` | \`eslint-report.json\`, \`tsc.log\`, \`prettier.log\` |"
+              echo "| \`pr-static-*\` | \`eslint-report.json\`, \`tsc.log\`, \`prettier.log\` |"
             fi
             if [ "$TEST_BLOCKED" -gt 0 ]; then
-              echo "| \`tests-*\` | \`vitest-results.json\`, \`vitest.log\` |"
+              echo "| \`pr-tests-*\` | \`vitest-results.json\`, \`vitest.log\` |"
             fi
-            if [ "$CONTEXT" = "staging" ] && [ "$BUILD_BLOCKED" -gt 0 ]; then
-              echo "| \`build-*\` | \`build.log\` (full Vite output) |"
+            if [ "$BUILD_BLOCKED" -gt 0 ]; then
+              echo "| \`pr-build-*\` | \`build.log\` (full build output) |"
             fi
           fi
 
           echo ""
           echo "---"
-          echo "<sub>Commit \`${SHORT_SHA}\` · Run [#${GITHUB_RUN_ID}](${RUN_URL}) · All artifact reports retained for 14 days.</sub>"
+          echo "<sub>Commit \`${SHORT_SHA}\` · Run [#${GITHUB_RUN_ID}](${RUN_URL}) · All artifact reports retained for 7 days.</sub>"
         } >> "$GITHUB_STEP_SUMMARY"
 
     # ─── Gate decision (exit 1 = required status check fails) ────────────────
@@ -336,7 +296,6 @@ runs:
         T_PASS="${{ inputs.tests_passed }}";       T_PASS="${T_PASS:-true}"
         T_FAIL="${{ inputs.test_failures }}";      T_FAIL="${T_FAIL:-0}"
         B_OK="${{ inputs.build_ok }}";             B_OK="${B_OK:-true}"
-        CONTEXT="${{ inputs.context }}"
 
         BLOCK=0; REASONS=""
         if [ "$SECRETS" -gt 0 ]; then
@@ -363,9 +322,9 @@ runs:
           BLOCK=1; REASONS="${REASONS} test-failures(${T_FAIL});"
           echo "::error title=Stage 4 — Vitest::${T_FAIL} test(s) failed. See the Annotations tab for test name + file:line + assertion message."
         fi
-        if [ "$CONTEXT" = "staging" ] && [ "$B_OK" != "true" ]; then
+        if [ "$B_OK" != "true" ]; then
           BLOCK=1; REASONS="${REASONS} build-failed;"
-          echo "::error title=Stage 5 — Production Build::Build failed. See the Annotations tab for file:line error locations and download the build artifact for full output."
+          echo "::error title=Stage 5 — Production Build::Build failed. See the Annotations tab for file:line error locations; download the pr-build artifact for the full log."
         fi
 
         if [ "$BLOCK" -gt 0 ]; then

@@ -1,32 +1,23 @@
 name: "Trivy Filesystem Scan"
-description: >
-  Runs Trivy across the repository filesystem for dependency vulnerabilities,
-  secrets, IaC/Dockerfile misconfigurations, and license issues. Writes a JSON
-  report (full detail) and a SARIF report (for the GitHub Security tab), then
-  emits a `critical` count (CRITICAL/HIGH vulns + any secrets + CRITICAL/HIGH
-  misconfigs) and a `warnings` count. Like the other scanners, this action never
-  fails the build — the CALLER decides what blocks.
+description: "Trivy over the repo for vulns, secrets, misconfigs and licenses. Emits `critical` (crit/high vulns + secrets + crit/high misconfigs) and `warnings`. Never fails the job — the gate decides."
 
 inputs:
   trivy-version:
-    description: "Pinned Trivy release to install."
+    description: "Pinned Trivy release."
     required: false
     default: "0.71.1"
 
 outputs:
   critical:
-    description: "Blocking findings: CRITICAL/HIGH vulns + secrets + CRITICAL/HIGH misconfigs."
+    description: "Blocking: CRITICAL/HIGH vulns + secrets + CRITICAL/HIGH misconfigs."
     value: ${{ steps.evaluate.outputs.critical }}
   warnings:
-    description: "Non-blocking findings: MEDIUM/LOW vulns + misconfigs + license issues."
+    description: "Non-blocking: MEDIUM/LOW vulns + misconfigs + license issues."
     value: ${{ steps.evaluate.outputs.warnings }}
 
 runs:
   using: composite
   steps:
-    # ------------------------------------------------------------------------
-    # Install a pinned Trivy release via the official installer.
-    # ------------------------------------------------------------------------
     - name: Install Trivy
       shell: bash
       run: |
@@ -41,12 +32,8 @@ runs:
         rm -f "${TARBALL}"
         trivy --version
 
-    # ------------------------------------------------------------------------
-    # One scan, JSON output (full detail for the combined report). Covers
-    # dependency vulnerabilities, secrets, misconfigurations, and licenses.
-    # `--exit-code 0` so we always reach evaluation; the caller gates.
-    # ------------------------------------------------------------------------
-    - name: Trivy filesystem scan (JSON)
+    # Full-detail JSON report. --exit-code 0 so we always reach evaluation.
+    - name: Trivy scan (JSON)
       shell: bash
       run: |
         set -uo pipefail
@@ -58,13 +45,11 @@ runs:
           --exit-code 0 \
           --no-progress \
           --skip-dirs node_modules \
-          || echo "Trivy (json) exited non-zero (captured for evaluation)"
+          || echo "Trivy (json) exited non-zero (captured)"
         if [ ! -s trivy-report.json ]; then echo '{}' > trivy-report.json; fi
 
-    # ------------------------------------------------------------------------
-    # SARIF output for the GitHub Security/code-scanning tab. Best-effort.
-    # ------------------------------------------------------------------------
-    - name: Trivy filesystem scan (SARIF)
+    # SARIF for the GitHub Security tab. Best-effort.
+    - name: Trivy scan (SARIF)
       shell: bash
       run: |
         set -uo pipefail
@@ -76,12 +61,10 @@ runs:
           --exit-code 0 \
           --no-progress \
           --skip-dirs node_modules \
-          || echo "Trivy (sarif) exited non-zero (captured for evaluation)"
+          || echo "Trivy (sarif) exited non-zero (captured)"
 
-    # ------------------------------------------------------------------------
-    # Classify into blocking vs warnings. No pass/fail here.
-    # ------------------------------------------------------------------------
-    - name: Evaluate Trivy results
+    # Classify into blocking vs warnings.
+    - name: Evaluate
       id: evaluate
       shell: bash
       run: |
@@ -109,7 +92,7 @@ runs:
           echo "warnings=$WARNINGS"
         } >> "$GITHUB_OUTPUT"
 
-    # ── GitHub annotations + step summary ─────────────────────────────────────
+    # ::error annotations for crit/high vulns + secrets, then a summary table.
     - name: Report findings (annotations + summary)
       if: always()
       shell: bash
@@ -118,7 +101,6 @@ runs:
         SHORT_SHA="${GITHUB_SHA:0:7}"
         F=trivy-report.json
 
-        # ── Trivy vuln + secret annotations ──────────────────────────────────
         if [ -s "$F" ]; then
           jq -r '
             .Results[]? | .Target as $target |
@@ -143,7 +125,6 @@ runs:
             done || true
         fi
 
-        # ── Step summary ──────────────────────────────────────────────────────
         VC=0; VW=0; SC=0; MC=0; MW=0; LIC=0
         if [ -s "$F" ]; then
           VC=$( jq '[.Results[]?.Vulnerabilities[]?   | select(.Severity=="CRITICAL" or .Severity=="HIGH")] | length' "$F" 2>/dev/null || echo 0)

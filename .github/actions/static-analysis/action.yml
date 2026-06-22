@@ -1,18 +1,12 @@
 name: "Static Code Analysis"
-description: >
-  Runs static analysis over the source tree: ESLint (lint rules), the
-  TypeScript compiler (`tsc --noEmit` type checking) and Prettier
-  (`--check` formatting). Classifies findings into `critical` (ESLint errors +
-  TypeScript type errors -> should block) and `warnings` (ESLint warnings +
-  Prettier formatting drift -> warn only). Like the other scanners, this action
-  never fails the build — the CALLER decides what blocks.
+description: "ESLint + tsc (--noEmit) + Prettier (--check). Emits `critical` (ESLint + TS errors, blocking) and `warnings` (ESLint warnings + Prettier drift). Never fails the job — the gate decides."
 
 outputs:
   critical:
-    description: "Blocking findings: ESLint errors + TypeScript type errors."
+    description: "Blocking: ESLint errors + TypeScript type errors."
     value: ${{ steps.evaluate.outputs.critical }}
   warnings:
-    description: "Non-blocking findings: ESLint warnings + Prettier formatting drift."
+    description: "Non-blocking: ESLint warnings + Prettier drift."
     value: ${{ steps.evaluate.outputs.warnings }}
   eslint_errors:
     description: "ESLint error count."
@@ -24,17 +18,13 @@ outputs:
     description: "TypeScript type error count."
     value: ${{ steps.evaluate.outputs.ts_errors }}
   prettier_issues:
-    description: "Number of files that are not Prettier-formatted."
+    description: "Files not Prettier-formatted."
     value: ${{ steps.evaluate.outputs.prettier_issues }}
 
 runs:
   using: composite
   steps:
-    # ------------------------------------------------------------------------
-    # ESLint — JSON report for the combined summary. `|| true` because eslint
-    # exits non-zero when it finds problems; we always reach evaluation and the
-    # caller gates. Errors block, warnings warn.
-    # ------------------------------------------------------------------------
+    # ESLint → JSON report (for the summary) + a human-readable log.
     - name: ESLint
       shell: bash
       run: |
@@ -44,45 +34,35 @@ runs:
           --ext .js,.jsx,.ts,.tsx \
           --format json \
           --output-file eslint-report.json \
-          || echo "ESLint reported problems (captured for evaluation)"
+          || echo "ESLint reported problems (captured)"
         if [ ! -s eslint-report.json ]; then echo '[]' > eslint-report.json; fi
 
-        # Human-readable mirror for the artifact / logs.
         npx eslint . \
           --ignore-path .gitignore \
           --ext .js,.jsx,.ts,.tsx \
           > eslint.log 2>&1 || true
 
-    # ------------------------------------------------------------------------
-    # TypeScript — `react-router typegen` first (generates route types) then
-    # `tsc --noEmit`. Any reported "error TS####" is a blocking type error.
-    # ------------------------------------------------------------------------
+    # Generate route types, then type-check. Any "error TS####" is blocking.
     - name: TypeScript typecheck
       shell: bash
       run: |
         set -uo pipefail
         npx react-router typegen || echo "typegen exited non-zero (captured)"
         npx tsc --noEmit --pretty false > tsc.log 2>&1 \
-          || echo "tsc reported type errors (captured for evaluation)"
+          || echo "tsc reported type errors (captured)"
         if [ ! -f tsc.log ]; then : > tsc.log; fi
 
-    # ------------------------------------------------------------------------
-    # Prettier — formatting drift is a warning, never blocking. `--check` lists
-    # files that would be reformatted.
-    # ------------------------------------------------------------------------
+    # Formatting drift is a warning, never blocking.
     - name: Prettier check
       shell: bash
       run: |
         set -uo pipefail
         npx prettier --check . > prettier.log 2>&1 \
-          || echo "Prettier reported unformatted files (captured for evaluation)"
+          || echo "Prettier reported unformatted files (captured)"
         if [ ! -f prettier.log ]; then : > prettier.log; fi
 
-    # ------------------------------------------------------------------------
-    # Classify findings into blocking (eslint errors + ts errors) vs warnings
-    # (eslint warnings + prettier drift). No pass/fail here.
-    # ------------------------------------------------------------------------
-    - name: Evaluate static analysis
+    # critical = eslint errors + ts errors; warnings = eslint warnings + prettier.
+    - name: Evaluate
       id: evaluate
       shell: bash
       run: |
@@ -95,22 +75,20 @@ runs:
           ESLINT_WARNINGS=$(jq '[.[].warningCount] | add // 0' eslint-report.json 2>/dev/null || echo 0)
         fi
 
-        # Count distinct "error TS####" diagnostics emitted by tsc.
-        # `grep -c` already prints 0 on no match; `|| true` only swallows its
-        # non-zero exit (using `|| echo 0` would append a SECOND line -> breaks $(( ))).
+        # grep -c prints 0 on no match; || true swallows its exit (|| echo 0 would
+        # add a second line and break the arithmetic below).
         TS_ERRORS=0
         if [ -s tsc.log ]; then
           TS_ERRORS=$(grep -cE 'error TS[0-9]+' tsc.log 2>/dev/null || true)
         fi
 
-        # Prettier prints "[warn] <file>" for each file that needs formatting.
-        # `[warn] <file>` per file; exclude the trailing "[warn] Code style…" summary line.
+        # One "[warn] <file>" per file; drop the trailing "[warn] Code style…" summary.
         PRETTIER_ISSUES=0
         if [ -s prettier.log ]; then
           PRETTIER_ISSUES=$(grep -E '^\[warn\] ' prettier.log 2>/dev/null | grep -cvE 'Code style|--write' || true)
         fi
 
-        # Normalise every value to a single, clean integer (strip stray whitespace/newlines).
+        # Normalise to clean integers.
         ESLINT_ERRORS=$(printf '%s' "${ESLINT_ERRORS:-0}" | tr -cd '0-9'); ESLINT_ERRORS=${ESLINT_ERRORS:-0}
         ESLINT_WARNINGS=$(printf '%s' "${ESLINT_WARNINGS:-0}" | tr -cd '0-9'); ESLINT_WARNINGS=${ESLINT_WARNINGS:-0}
         TS_ERRORS=$(printf '%s' "${TS_ERRORS:-0}" | tr -cd '0-9'); TS_ERRORS=${TS_ERRORS:-0}
@@ -131,10 +109,7 @@ runs:
           echo "prettier_issues=$PRETTIER_ISSUES"
         } >> "$GITHUB_OUTPUT"
 
-    # ── GitHub annotations + step summary ─────────────────────────────────────
-    # Annotations show inline on the PR diff and in the "Annotations" tab.
-    # Format: ::error file={path},line={line},col={col},title={title}::{msg}
-    # ──────────────────────────────────────────────────────────────────────────
+    # Inline ::error/::warning annotations (file:line:col) + a summary table.
     - name: Report findings (annotations + summary)
       if: always()
       shell: bash
@@ -142,7 +117,6 @@ runs:
         set -uo pipefail
         SHORT_SHA="${GITHUB_SHA:0:7}"
 
-        # ── ESLint annotations ────────────────────────────────────────────────
         if [ -s eslint-report.json ]; then
           jq -r '
             .[] |
@@ -164,8 +138,7 @@ runs:
             done || true
         fi
 
-        # ── TypeScript annotations ────────────────────────────────────────────
-        # tsc output format: path(line,col): error TSxxxx: message
+        # tsc format: path(line,col): error TSxxxx: message
         if [ -s tsc.log ]; then
           grep -E '^.*\([0-9]+,[0-9]+\): error TS' tsc.log 2>/dev/null \
           | sed 's/\r//' \
@@ -181,7 +154,6 @@ runs:
             done || true
         fi
 
-        # ── Prettier annotations ──────────────────────────────────────────────
         if [ -s prettier.log ]; then
           grep -E '^\[warn\] ' prettier.log 2>/dev/null \
           | grep -vE 'Code style|--write' \
@@ -191,7 +163,6 @@ runs:
             done || true
         fi
 
-        # ── Step summary ──────────────────────────────────────────────────────
         ESLINT_E=$(jq '[.[].errorCount]   | add // 0' eslint-report.json 2>/dev/null || echo 0)
         ESLINT_W=$(jq '[.[].warningCount] | add // 0' eslint-report.json 2>/dev/null || echo 0)
         TS_E=$(grep -cE 'error TS[0-9]+' tsc.log 2>/dev/null || true); TS_E=${TS_E:-0}
@@ -206,7 +177,6 @@ runs:
           echo "| TypeScript | ${TS_E} | 0 |"
           echo "| Prettier | 0 | ${PRETTIER_W} |"
 
-          # ESLint error detail table
           if [ -s eslint-report.json ] && [ "${ESLINT_E}" -gt 0 ]; then
             echo ""
             echo "#### ESLint Errors"
@@ -225,7 +195,6 @@ runs:
             ' eslint-report.json 2>/dev/null | head -50 || true
           fi
 
-          # TypeScript error detail
           if [ -s tsc.log ] && [ "${TS_E}" -gt 0 ]; then
             echo ""
             echo "#### TypeScript Errors"
@@ -235,7 +204,6 @@ runs:
             echo '```'
           fi
 
-          # Prettier detail
           if [ -s prettier.log ] && [ "${PRETTIER_W}" -gt 0 ]; then
             echo ""
             echo "#### Prettier — Files needing format"

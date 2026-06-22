@@ -1,17 +1,13 @@
-name: "Setup Node.js & Install Dependencies"
-description: >
-  Sets up Node.js at a pinned version with npm cache enabled, then
-  optionally runs `npm ci`. Used in every job that needs the project
-  installed — centralises the setup so changing the Node version in one
-  place propagates everywhere.
+name: "Setup Node & Install"
+description: "Install a pinned Node version with npm cache, then optionally run npm ci."
 
 inputs:
   node-version:
-    description: "Node.js version to install (matches package.json engines)."
+    description: "Node.js version (match package.json engines)."
     required: false
     default: "20"
   install:
-    description: "Run `npm ci` after setup. Set to 'false' for scan-only jobs."
+    description: "Run npm ci after setup. Set 'false' for scan-only jobs."
     required: false
     default: "true"
 
@@ -24,7 +20,7 @@ runs:
         node-version: ${{ inputs.node-version }}
         cache: "npm"
 
-    - name: Install dependencies (npm ci)
+    - name: Install dependencies
       if: inputs.install == 'true'
       shell: bash
       run: npm ci
